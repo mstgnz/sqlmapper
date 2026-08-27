@@ -1,5 +1,7 @@
 package sqlmapper
 
+import "regexp"
+
 // DatabaseType represents the supported database types
 type DatabaseType string
 
@@ -66,9 +68,12 @@ type Column struct {
 	AutoIncrement   bool
 	IsPrimaryKey    bool
 	IsUnique        bool
+	IsUnsigned      bool
 	Comment         string
 	Order           int
 	CheckExpression string
+	EnumValues      []string // for ENUM/SET types
+	IsArray         bool     // PostgreSQL array type (e.g. text[])
 }
 
 // Index represents a table index
@@ -76,8 +81,8 @@ type Index struct {
 	Name        string
 	Columns     []string
 	IsUnique    bool
-	IsBitmap    bool   // Oracle için bitmap indeks desteği
-	IsClustered bool   // SQL Server için clustered indeks desteği
+	IsBitmap    bool   // Oracle bitmap index support
+	IsClustered bool   // SQL Server clustered index support
 	Type        string // BTREE, HASH etc.
 	Condition   string // WHERE clause
 	TableSpace  string
@@ -305,4 +310,106 @@ type Type struct {
 	Schema     string
 	Kind       string // ENUM, COMPOSITE, DOMAIN, etc.
 	Definition string
+}
+
+// OrderTablesByDependency sorts tables so that a table appears after every table
+// its foreign keys point at, and reports the constraints that ordering alone
+// cannot satisfy.
+//
+// Dump tools do not emit tables in dependency order. mysqldump sorts them
+// alphabetically, so a child table routinely precedes its parent and the
+// generated SQL fails to load with "relation does not exist". Generators call
+// this to fix the order before writing anything out.
+//
+// The second return value maps a table name to the foreign keys that still point
+// forward after sorting, which happens only when tables reference each other in
+// a cycle. Those must be emitted as trailing ALTER TABLE statements rather than
+// inline, because no ordering can satisfy them.
+func OrderTablesByDependency(tables []Table) ([]Table, map[string][]Constraint) {
+	index := make(map[string]int, len(tables))
+	for i, t := range tables {
+		index[t.Name] = i
+	}
+
+	// parents[i] holds the indexes table i depends on. A self-reference is not a
+	// dependency: a table can always point at itself in its own definition.
+	parents := make([]map[int]bool, len(tables))
+	inDegree := make([]int, len(tables))
+	for i, t := range tables {
+		parents[i] = map[int]bool{}
+		for _, c := range t.Constraints {
+			if c.Type != "FOREIGN KEY" || c.RefTable == "" {
+				continue
+			}
+			ref, ok := index[c.RefTable]
+			if !ok || ref == i || parents[i][ref] {
+				continue
+			}
+			parents[i][ref] = true
+			inDegree[i]++
+		}
+	}
+
+	// Kahn's algorithm, scanning in the original order so the result is stable.
+	ordered := make([]Table, 0, len(tables))
+	emitted := make([]bool, len(tables))
+	for len(ordered) < len(tables) {
+		progressed := false
+		for i := range tables {
+			if emitted[i] || inDegree[i] != 0 {
+				continue
+			}
+			emitted[i] = true
+			progressed = true
+			ordered = append(ordered, tables[i])
+			for j := range tables {
+				if !emitted[j] && parents[j][i] {
+					inDegree[j]--
+				}
+			}
+		}
+		if !progressed {
+			// Everything left is part of a cycle; keep the original order.
+			for i := range tables {
+				if !emitted[i] {
+					emitted[i] = true
+					ordered = append(ordered, tables[i])
+				}
+			}
+		}
+	}
+
+	position := make(map[string]int, len(ordered))
+	for i, t := range ordered {
+		position[t.Name] = i
+	}
+
+	deferred := map[string][]Constraint{}
+	for i, t := range ordered {
+		for _, c := range t.Constraints {
+			if c.Type != "FOREIGN KEY" || c.RefTable == "" {
+				continue
+			}
+			if ref, ok := position[c.RefTable]; ok && ref > i {
+				deferred[t.Name] = append(deferred[t.Name], c)
+			}
+		}
+	}
+
+	return ordered, deferred
+}
+
+// jsonEmulationCheckRe matches MariaDB's json_valid() guard.
+var jsonEmulationCheckRe = regexp.MustCompile(`(?i)\bjson_valid\s*\(`)
+
+// IsJSONEmulationCheck reports whether a CHECK constraint exists only to emulate
+// a JSON column type.
+//
+// MariaDB has no JSON type: it stores JSON in a LONGTEXT and attaches
+// CHECK (json_valid(col)) to police it. Every other dialect either has a real
+// JSON type or has nothing, and none of them has a json_valid function, so
+// carrying the check across turns a working schema into one that will not load.
+// Generators use this to drop it.
+func IsJSONEmulationCheck(expression string) bool {
+	return jsonEmulationCheckRe.MatchString(expression)
 }

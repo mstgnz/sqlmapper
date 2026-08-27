@@ -1,178 +1,122 @@
 # Stream Processing
 
-SQLMapper provides stream processing capabilities for handling large SQL files efficiently. This feature allows you to process SQL dumps in parallel, improving performance for large datasets.
+The stream parsers read a dump statement by statement and hand each schema object to a callback, so a dump larger than available memory can still be processed. Every dialect ships one.
 
-## Overview
+## Constructors
 
-The stream processing feature:
-- Processes SQL statements in parallel
-- Uses worker pools for efficient resource utilization
-- Supports all major database types
-- Provides real-time callback for processed objects
-- Handles large SQL files without loading entire content into memory
-- Includes comprehensive monitoring and logging system
+| Dialect | Constructor |
+| --- | --- |
+| MySQL | `mysql.NewMySQLStreamParser()` |
+| PostgreSQL | `postgres.NewPostgreSQLStreamParser()` |
+| SQLite | `sqlite.NewSQLiteStreamParser()` |
+| Oracle | `oracle.NewOracleStreamParser()` |
+| SQL Server | `sqlserver.NewSQLServerStreamParser()` |
 
-## Usage
-
-### Basic Stream Processing
+All of them satisfy `stream.StreamParser`:
 
 ```go
-parser := sqlmapper.NewStreamParser(sqlmapper.MySQL)
-
-err := parser.ParseStream(sqlContent, func(obj interface{}) error {
-    switch v := obj.(type) {
-    case sqlmapper.Table:
-        // Handle table
-    case sqlmapper.View:
-        // Handle view
-    case sqlmapper.Function:
-        // Handle function
-    }
-    return nil
-})
-```
-
-### Parallel Stream Processing
-
-```go
-parser := sqlmapper.NewStreamParser(sqlmapper.MySQL)
-
-// Process with 4 workers
-err := parser.ParseStreamParallel(sqlContent, 4, func(obj interface{}) error {
-    switch v := obj.(type) {
-    case sqlmapper.Table:
-        fmt.Printf("Processing table: %s\n", v.Name)
-    case sqlmapper.View:
-        fmt.Printf("Processing view: %s\n", v.Name)
-    }
-    return nil
-})
-```
-
-## Configuration
-
-### Worker Pool Size
-
-The number of workers can be configured based on your system's capabilities:
-
-```go
-// For CPU-bound tasks
-workers := runtime.NumCPU()
-
-// For I/O-bound tasks
-workers := runtime.NumCPU() * 2
-```
-
-### Supported Object Types
-
-The stream processor can handle various SQL objects:
-
-- Tables
-- Views
-- Functions
-- Procedures
-- Triggers
-- Indexes
-- Sequences
-
-Each object is passed to the callback function as it's processed.
-
-## Error Handling
-
-Errors during stream processing are handled gracefully:
-
-```go
-err := parser.ParseStreamParallel(sqlContent, 4, func(obj interface{}) error {
-    if err := processObject(obj); err != nil {
-        return fmt.Errorf("failed to process object: %v", err)
-    }
-    return nil
-})
-
-if err != nil {
-    log.Printf("Stream processing error: %v", err)
+type StreamParser interface {
+	ParseStream(reader io.Reader, callback func(SchemaObject) error) error
+	ParseStreamParallel(reader io.Reader, callback func(SchemaObject) error, workers int) error
+	GenerateStream(schema *sqlmapper.Schema, writer io.Writer) error
 }
 ```
 
-## Best Practices
+Note that the input is an `io.Reader`, not a string. That is the point: the file is never fully materialised.
 
-1. **Worker Pool Size**
-   - Start with number of CPU cores
-   - Adjust based on performance monitoring
-   - Consider memory constraints
-
-2. **Error Handling**
-   - Always check for errors in callback
-   - Log errors appropriately
-   - Consider implementing retry logic
-
-3. **Memory Management**
-   - Process objects as they come
-   - Avoid storing large amounts of data
-   - Use channels for communication
-
-4. **Performance Optimization**
-   - Monitor CPU and memory usage
-   - Adjust worker count based on system load
-   - Consider batch processing for small objects
-
-## Examples
-
-### Processing with Progress Tracking
+## Basic usage
 
 ```go
-var processed int64
+package main
 
-err := parser.ParseStreamParallel(sqlContent, 4, func(obj interface{}) error {
-    atomic.AddInt64(&processed, 1)
-    fmt.Printf("\rProcessed objects: %d", processed)
-    return nil
-})
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/mysql"
+	"github.com/mstgnz/sqlmapper/stream"
+)
+
+func main() {
+	file, err := os.Open("dump.sql")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	parser := mysql.NewMySQLStreamParser()
+
+	err = parser.ParseStream(file, func(obj stream.SchemaObject) error {
+		switch obj.Type {
+		case stream.TableObject:
+			table := obj.Data.(*sqlmapper.Table)
+			fmt.Printf("table: %s (%d columns)\n", table.Name, len(table.Columns))
+		case stream.ViewObject:
+			view := obj.Data.(*sqlmapper.View)
+			fmt.Printf("view: %s\n", view.Name)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
 ```
 
-### Custom Object Processing
+Returning an error from the callback aborts the parse and surfaces that error.
+
+## Parallel parsing
+
+`ParseStreamParallel` spreads statements across a worker pool. The worker count is the third argument, after the callback:
 
 ```go
-err := parser.ParseStreamParallel(sqlContent, 4, func(obj interface{}) error {
-    switch v := obj.(type) {
-    case sqlmapper.Table:
-        return processTable(v)
-    case sqlmapper.View:
-        return processView(v)
-    case sqlmapper.Function:
-        return processFunction(v)
-    default:
-        return fmt.Errorf("unsupported object type")
-    }
-})
+err := parser.ParseStreamParallel(file, func(obj stream.SchemaObject) error {
+	return handle(obj)
+}, runtime.NumCPU())
 ```
 
-### Error Recovery
+Your callback runs on the goroutine that drains the results channel, not on the workers, so it does not need to be safe for concurrent use itself. Anything it closes over and mutates does, if you spawn work from inside it.
+
+Object order is not preserved in parallel mode. If you care about the order objects appeared in the file, use `ParseStream`.
+
+## Object types
+
+`SchemaObject.Type` is one of `TableObject`, `ViewObject`, `FunctionObject`, `ProcedureObject`, `TriggerObject`, `IndexObject`, `ConstraintObject`, `SequenceObject`, `TypeObject` or `PermissionObject`. `SchemaObject.Data` holds a pointer to the matching struct from the root package.
+
+Which of these a given dialect actually emits varies. MySQL and PostgreSQL cover tables, views, functions, procedures and triggers; the others cover less.
+
+## Writing a dump back out
+
+`GenerateStream` writes a schema to an `io.Writer` without building the whole string in memory:
 
 ```go
-err := parser.ParseStreamParallel(sqlContent, 4, func(obj interface{}) error {
-    for attempts := 0; attempts < 3; attempts++ {
-        if err := processObject(obj); err != nil {
-            if attempts == 2 {
-                return err
-            }
-            continue
-        }
-        break
-    }
-    return nil
-})
+out, err := os.Create("converted.sql")
+if err != nil {
+	log.Fatal(err)
+}
+defer out.Close()
+
+err = postgres.NewPostgreSQLStreamParser().GenerateStream(schema, out)
 ```
+
+## Statement delimiters
+
+Each dialect uses the delimiter its own dumps use, which matters when you build a fixture by hand:
+
+| Dialect | Delimiter |
+| --- | --- |
+| MySQL, PostgreSQL, SQLite | `;` |
+| Oracle | `/` on its own line |
+| SQL Server | `GO` |
+
+`CREATE OR REPLACE` is understood everywhere it is legal; the optional keywords are folded away before the statement is classified.
 
 ## Limitations
 
-- Maximum file size depends on available system memory
-- Some complex SQL statements might require sequential processing
-- Performance depends on system resources and SQL complexity
-
-## Performance Considerations
-
-- Worker pool size affects memory usage
-- Large SQL files might require batching
-- Consider network I/O for database operations
-- Monitor system resources during processing 
+- **Statement splitting is delimiter based.** The reader tracks string literals and comments, so a semicolon inside a quoted value is safe. A semicolon inside a `BEGIN ... END` block or a `$$ ... $$` body is not: such a statement gets split and will fail to parse.
+- **A parser instance holds state.** Use one per goroutine. `ParseStreamParallel` handles this internally, but do not share a parser across your own goroutines.
+- **Errors abort the run.** There is no skip-and-continue mode. One unparseable statement ends the stream.
+- **An index arrives without its table.** `SchemaObject` has no field naming the table an index belongs to, so a consumer that needs the association has to track it from the surrounding statements.
+- **Order is not preserved in parallel mode.** Use `ParseStream` when it matters.

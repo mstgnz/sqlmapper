@@ -47,17 +47,17 @@ func TestOracle_Parse(t *testing.T) {
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
 				assert.Len(t, schema.Tables, 2)
 
-				// Users tablosu kontrolü
+				// Check the users table
 				usersTable := schema.Tables[0]
 				assert.Equal(t, "users", usersTable.Name)
 				assert.Len(t, usersTable.Columns, 7)
 
-				// Posts tablosu kontrolü
+				// Check the posts table
 				postsTable := schema.Tables[1]
 				assert.Equal(t, "posts", postsTable.Name)
 				assert.Len(t, postsTable.Columns, 7)
 
-				// Foreign key kontrolü
+				// Check the foreign key
 				fkFound := false
 				for _, constraint := range postsTable.Constraints {
 					if constraint.Type == "FOREIGN KEY" {
@@ -124,7 +124,7 @@ func TestOracle_Parse(t *testing.T) {
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
 				assert.Len(t, schema.Triggers, 2)
 
-				// Users trigger kontrolü
+				// Check the users trigger
 				usersTrigger := schema.Triggers[0]
 				assert.Equal(t, "users_update_timestamp", usersTrigger.Name)
 				assert.Equal(t, "users", usersTrigger.Table)
@@ -132,7 +132,7 @@ func TestOracle_Parse(t *testing.T) {
 				assert.Equal(t, "UPDATE", usersTrigger.Event)
 				assert.True(t, usersTrigger.ForEachRow)
 
-				// Posts trigger kontrolü
+				// Check the posts trigger
 				postsTrigger := schema.Triggers[1]
 				assert.Equal(t, "posts_update_timestamp", postsTrigger.Name)
 				assert.Equal(t, "posts", postsTrigger.Table)
@@ -217,8 +217,8 @@ CREATE TABLE products (
     name VARCHAR2(100) NOT NULL,
     price NUMBER(10,2)
 );
-CREATE INDEX idx_name ON products(name);
-CREATE UNIQUE INDEX idx_price ON products(price);`),
+CREATE INDEX idx_name ON products (name);
+CREATE UNIQUE INDEX idx_price ON products (price);`),
 			wantErr: false,
 		},
 		{
@@ -247,7 +247,7 @@ CREATE TABLE users (
     id NUMBER PRIMARY KEY,
     username VARCHAR2(50) NOT NULL UNIQUE,
     email VARCHAR2(100) NOT NULL,
-    status VARCHAR2(20) NOT NULL DEFAULT 'active'
+    status VARCHAR2(20) DEFAULT 'active' NOT NULL
 );
 
 CREATE OR REPLACE VIEW active_users_view AS

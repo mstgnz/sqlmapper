@@ -3,6 +3,7 @@ package sqlserver
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -16,6 +17,10 @@ type SQLServerStreamParser struct {
 }
 
 // NewSQLServerStreamParser creates a new SQL Server stream parser
+// sqlserverStreamIndexRe reads a standalone CREATE INDEX statement, which the whole-file
+// parser cannot do because it resolves the target table first.
+var sqlserverStreamIndexRe = regexp.MustCompile(`(?i)CREATE\s+(?:(UNIQUE)\s+)?(?:(CLUSTERED|NONCLUSTERED)\s+)?INDEX\s+([.\w\[\]]+)\s+ON\s+([.\w\[\]]+)\s*\((.*?)\)`)
+
 func NewSQLServerStreamParser() *SQLServerStreamParser {
 	return &SQLServerStreamParser{
 		sqlserver: NewSQLServer().(*SQLServer),
@@ -39,9 +44,10 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		if statement == "" {
 			continue
 		}
+		dispatch := dispatchKey(statement)
 
 		// Parse CREATE TABLE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
+		if strings.HasPrefix(dispatch, "CREATE TABLE") {
 			table, err := p.parseTableStatement(statement)
 			if err != nil {
 				return err
@@ -58,7 +64,7 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		}
 
 		// Parse CREATE VIEW statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE VIEW") {
+		if strings.HasPrefix(dispatch, "CREATE VIEW") {
 			view, err := p.parseViewStatement(statement)
 			if err != nil {
 				return err
@@ -75,7 +81,7 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		}
 
 		// Parse CREATE FUNCTION statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE FUNCTION") {
+		if strings.HasPrefix(dispatch, "CREATE FUNCTION") {
 			function, err := p.parseFunctionStatement(statement)
 			if err != nil {
 				return err
@@ -92,8 +98,8 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		}
 
 		// Parse CREATE PROCEDURE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE PROCEDURE") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE PROC") {
+		if strings.HasPrefix(dispatch, "CREATE PROCEDURE") ||
+			strings.HasPrefix(dispatch, "CREATE PROC") {
 			procedure, err := p.parseProcedureStatement(statement)
 			if err != nil {
 				return err
@@ -110,7 +116,7 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		}
 
 		// Parse CREATE TRIGGER statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TRIGGER") {
+		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
 			trigger, err := p.parseTriggerStatement(statement)
 			if err != nil {
 				return err
@@ -127,10 +133,10 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 		}
 
 		// Parse CREATE INDEX statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE UNIQUE INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE CLUSTERED INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE NONCLUSTERED INDEX") {
+		if strings.HasPrefix(dispatch, "CREATE INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE UNIQUE INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE CLUSTERED INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE NONCLUSTERED INDEX") {
 			index, err := p.parseIndexStatement(statement)
 			if err != nil {
 				return err
@@ -221,7 +227,7 @@ func (p *SQLServerStreamParser) ParseStreamParallel(reader io.Reader, callback f
 
 // parseStatement parses a single SQL statement and returns a SchemaObject
 func (p *SQLServerStreamParser) parseStatement(statement string) (*stream.SchemaObject, error) {
-	upperStatement := strings.ToUpper(statement)
+	upperStatement := dispatchKey(statement)
 
 	switch {
 	case strings.HasPrefix(upperStatement, "CREATE TABLE"):
@@ -298,8 +304,11 @@ func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer 
 	}
 
 	// Write tables
-	for _, table := range schema.Tables {
-		stmt := p.sqlserver.generateTableSQL(table)
+	// Order the tables the same way Generate does, so a streamed schema loads
+	// even when the source listed a child table before its parent.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+	for _, table := range tables {
+		stmt := p.sqlserver.generateTableSQL(table, deferredFKs[table.Name])
 		if _, err := writer.Write([]byte(stmt + "\nGO\n\n")); err != nil {
 			return err
 		}
@@ -375,9 +384,11 @@ func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer 
 // parseTableStatement parses a CREATE TABLE statement
 func (p *SQLServerStreamParser) parseTableStatement(statement string) (*sqlmapper.Table, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLServer{schema: tempSchema}
 
-	if err := p.sqlserver.parseTables(statement); err != nil {
+	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -391,9 +402,11 @@ func (p *SQLServerStreamParser) parseTableStatement(statement string) (*sqlmappe
 // parseViewStatement parses a CREATE VIEW statement
 func (p *SQLServerStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLServer{schema: tempSchema}
 
-	if err := p.sqlserver.parseViews(statement); err != nil {
+	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -407,9 +420,11 @@ func (p *SQLServerStreamParser) parseViewStatement(statement string) (*sqlmapper
 // parseFunctionStatement parses a CREATE FUNCTION statement
 func (p *SQLServerStreamParser) parseFunctionStatement(statement string) (*sqlmapper.Function, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLServer{schema: tempSchema}
 
-	if err := p.sqlserver.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -429,9 +444,11 @@ func (p *SQLServerStreamParser) parseFunctionStatement(statement string) (*sqlma
 // parseProcedureStatement parses a CREATE PROCEDURE statement
 func (p *SQLServerStreamParser) parseProcedureStatement(statement string) (*sqlmapper.Procedure, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLServer{schema: tempSchema}
 
-	if err := p.sqlserver.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -457,9 +474,11 @@ func (p *SQLServerStreamParser) parseProcedureStatement(statement string) (*sqlm
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *SQLServerStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLServer{schema: tempSchema}
 
-	if err := p.sqlserver.parseTriggers(statement); err != nil {
+	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -472,16 +491,45 @@ func (p *SQLServerStreamParser) parseTriggerStatement(statement string) (*sqlmap
 
 // parseIndexStatement parses a CREATE INDEX statement
 func (p *SQLServerStreamParser) parseIndexStatement(statement string) (*sqlmapper.Index, error) {
-	tempSchema := &sqlmapper.Schema{}
-	p.sqlserver.schema = tempSchema
-
-	if err := p.sqlserver.parseIndexes(statement); err != nil {
-		return nil, err
-	}
-
-	if len(tempSchema.Tables) == 0 || len(tempSchema.Tables[0].Indexes) == 0 {
+	// parseIndexes attaches the index to a table that is already present in the
+	// schema, which never holds for a single statement read off the stream, so
+	// the statement is read directly here.
+	m := sqlserverStreamIndexRe.FindStringSubmatch(ensureTerminated(statement))
+	if len(m) < 6 {
 		return nil, fmt.Errorf("no index found in statement")
 	}
 
-	return &tempSchema.Tables[0].Indexes[0], nil
+	index := &sqlmapper.Index{
+		Name:        strings.Trim(m[3], "[]"),
+		Columns:     (&SQLServer{}).splitAndTrim(m[5]),
+		IsUnique:    strings.TrimSpace(m[1]) != "",
+		IsClustered: strings.EqualFold(strings.TrimSpace(m[2]), "CLUSTERED"),
+	}
+	return index, nil
+}
+
+// ensureTerminated prepares a single statement handed over by the stream reader
+// for the whole-file parsers. Those parsers run after a normalisation pass that
+// collapses whitespace and they anchor several patterns on the trailing
+// delimiter, both of which a raw statement is missing.
+func ensureTerminated(statement string) string {
+	s := strings.Join(strings.Fields(statement), " ")
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, ";") {
+		return s
+	}
+	return s + ";"
+}
+
+// orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
+// object keyword.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+
+// dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
+// FUNCTION" shifts every fixed prefix, so the optional keywords are folded away
+// once here rather than doubling every case in the dispatch.
+func dispatchKey(statement string) string {
+	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
 }

@@ -46,6 +46,8 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, fmt.Errorf("empty content")
 	}
 
+	content = stripSQLComments(content)
+
 	s.buf = bytes.NewBuffer([]byte(content))
 	s.schema = &sqlmapper.Schema{}
 
@@ -121,8 +123,10 @@ func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 		return table, fmt.Errorf("no columns found in CREATE TABLE statement")
 	}
 
-	// Parse columns
-	columnDefs := bytes.Split(bytes.TrimSpace(stmt[startIdx+1:endIdx]), []byte(","))
+	// Parse columns. Splitting on every comma would cut a definition in half at
+	// the comma inside CHECK (status IN ('a','b')) or DECIMAL(10,2), so the split
+	// tracks parentheses and string literals.
+	columnDefs := splitTopLevelCommas(bytes.TrimSpace(stmt[startIdx+1 : endIdx]))
 	for _, colDef := range columnDefs {
 		colDef = bytes.TrimSpace(colDef)
 		if len(colDef) == 0 {
@@ -172,35 +176,28 @@ func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 	return table, nil
 }
 
+// sqliteIndexHeaderRe reads the index name and target table out of a CREATE
+// INDEX header, tolerating the optional UNIQUE and IF NOT EXISTS keywords.
+var sqliteIndexHeaderRe = regexp.MustCompile(`(?i)CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `"\[\].\w]+)\s+ON\s+([` + "`" + `"\[\].\w]+)`)
+
 // parseCreateIndex parses a CREATE INDEX statement and adds the index to the appropriate table.
 func (s *SQLite) parseCreateIndex(stmt []byte) error {
 	isUnique := bytes.HasPrefix(bytes.ToUpper(stmt), []byte("CREATE UNIQUE"))
 
-	// Extract index name and table name
-	parts := bytes.Fields(stmt)
-	if len(parts) < 4 {
+	// Match the header rather than counting tokens: the optional UNIQUE and
+	// IF NOT EXISTS keywords shift every fixed position, and reading the table
+	// name off a fixed index turned "IF NOT EXISTS" into a table called EXISTS.
+	m := sqliteIndexHeaderRe.FindSubmatch(stmt)
+	if m == nil {
 		return fmt.Errorf("invalid CREATE INDEX statement")
 	}
 
-	var indexNamePos, tableNamePos int
-	if isUnique {
-		indexNamePos = 3
-		tableNamePos = 5
-	} else {
-		indexNamePos = 2
-		tableNamePos = 4
-	}
-
-	if len(parts) <= tableNamePos {
-		return fmt.Errorf("invalid CREATE INDEX statement: missing table name")
-	}
-
-	indexName := string(bytes.Trim(parts[indexNamePos], "`"))
-	tableName := string(bytes.Trim(parts[tableNamePos], "`"))
+	indexName := strings.Trim(string(m[1]), "`\"[]")
+	tableName := strings.Trim(strings.TrimSpace(string(m[2])), "`\"[]")
 
 	// Remove schema prefix if exists
-	if idx := bytes.LastIndex(parts[tableNamePos], []byte(".")); idx != -1 {
-		tableName = string(bytes.Trim(parts[tableNamePos][idx+1:], "`"))
+	if idx := strings.LastIndexByte(tableName, '.'); idx != -1 {
+		tableName = tableName[idx+1:]
 	}
 
 	// Extract columns
@@ -525,38 +522,6 @@ func (s *SQLite) parseTriggers(statement string) error {
 	return nil
 }
 
-func (s *SQLite) parseIndexes(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+ON\s+([.\w]+)\s*\((.*?)\)`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 3 {
-		indexName := matches[1]
-		tableName := matches[2]
-		columns := strings.Split(matches[3], ",")
-
-		// Find the table
-		for i, table := range s.schema.Tables {
-			if table.Name == tableName || fmt.Sprintf("%s.%s", table.Schema, table.Name) == tableName {
-				index := sqlmapper.Index{
-					Name:     indexName,
-					Columns:  make([]string, len(columns)),
-					IsUnique: strings.Contains(statement, "UNIQUE"),
-				}
-
-				// Clean column names
-				for j, col := range columns {
-					index.Columns[j] = strings.TrimSpace(col)
-				}
-
-				s.schema.Tables[i].Indexes = append(s.schema.Tables[i].Indexes, index)
-				break
-			}
-		}
-	}
-
-	return nil
-}
-
 // generateTableSQL generates SQL for a table
 func (s *SQLite) generateTableSQL(table sqlmapper.Table) string {
 	sql := "CREATE TABLE " + table.Name + " (\n"
@@ -610,4 +575,90 @@ func (s *SQLite) generateIndexSQL(tableName string, index sqlmapper.Index) strin
 	sql += index.Name + " ON " + tableName + " (" + strings.Join(index.Columns, ", ") + ")"
 
 	return sql
+}
+
+// stripSQLComments removes -- line comments and /* */ block comments while
+// leaving string literals untouched. Statement splitting runs on the result:
+// without this a comment sitting directly above a statement ends up glued to it
+// and the whole statement is skipped as if it were a comment.
+func stripSQLComments(content string) string {
+	var out strings.Builder
+	out.Grow(len(content))
+	inString, inLine, inBlock := false, false, false
+
+	for i := 0; i < len(content); i++ {
+		c := content[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+				out.WriteByte(c)
+			}
+		case inBlock:
+			if c == '*' && i+1 < len(content) && content[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+		case inString:
+			out.WriteByte(c)
+			if c == '\'' {
+				if i+1 < len(content) && content[i+1] == '\'' {
+					out.WriteByte(content[i+1])
+					i++
+				} else {
+					inString = false
+				}
+			}
+		case c == '\'':
+			inString = true
+			out.WriteByte(c)
+		case c == '-' && i+1 < len(content) && content[i+1] == '-':
+			inLine = true
+			i++
+		case c == '/' && i+1 < len(content) && content[i+1] == '*':
+			inBlock = true
+			i++
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}
+
+// splitTopLevelCommas splits a CREATE TABLE body on the commas that separate
+// definitions, ignoring the ones nested inside parentheses or string literals.
+func splitTopLevelCommas(body []byte) [][]byte {
+	var parts [][]byte
+	depth := 0
+	inString := false
+	start := 0
+
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\'':
+			if inString && i+1 < len(body) && body[i+1] == '\'' {
+				i++
+				continue
+			}
+			inString = !inString
+		case '(':
+			if !inString {
+				depth++
+			}
+		case ')':
+			if !inString {
+				depth--
+			}
+		case ',':
+			if !inString && depth == 0 {
+				parts = append(parts, body[start:i])
+				start = i + 1
+			}
+		}
+	}
+
+	if start < len(body) {
+		parts = append(parts, body[start:])
+	}
+	return parts
 }

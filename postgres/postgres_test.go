@@ -31,7 +31,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
 				assert.NotNil(t, schema)
-				// SET komutları şu an için parse edilmiyor
+				// SET statements are not parsed yet
 			},
 		},
 		{
@@ -98,7 +98,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				ALTER TABLE employees RENAME TO staff;`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// ALTER komutları şu an için parse edilmiyor
+				// ALTER statements are not parsed yet
 			},
 		},
 		{
@@ -108,7 +108,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				DROP TABLE employees CASCADE;`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// DROP komutları şu an için parse edilmiyor
+				// DROP statements are not parsed yet
 			},
 		},
 		{
@@ -120,7 +120,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				CREATE INDEX idx_employee_document ON employees USING gin (document jsonb_path_ops);`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// Index'ler tabloya bağlı olduğu için önce tablo oluşturulmalı
+				// Indexes attach to a table, so the table has to be created first
 			},
 		},
 		{
@@ -273,7 +273,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				COMMENT ON FUNCTION calculate_salary(integer) IS 'Calculates employee salary with bonuses';`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// Comment'ler ilgili nesnelerin comment field'larında saklanmalı
+				// Comments belong in the Comment field of the object they describe
 			},
 		},
 		{
@@ -325,7 +325,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				SET CONSTRAINTS fk_department IMMEDIATE;`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// SET CONSTRAINTS komutları şu an için parse edilmiyor
+				// SET CONSTRAINTS statements are not parsed yet
 			},
 		},
 		{
@@ -345,7 +345,7 @@ func TestPostgreSQL_Parse(t *testing.T) {
 				WHERE hire_date > '2023-01-01';`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// INSERT komutları şu an için parse edilmiyor
+				// INSERT statements are not parsed yet
 			},
 		},
 	}

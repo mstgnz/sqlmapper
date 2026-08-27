@@ -1,46 +1,34 @@
 # Build stage
-FROM golang:1.23-bullseye AS builder
+FROM golang:1.23-alpine AS builder
 
-# Install necessary build tools
-RUN apt-get update && apt-get install -y \
-    git \
-    gcc \
-    g++ \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
 WORKDIR /app
 
-# Copy go.mod and go.sum
+# Cache the module download layer separately from the source.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=1 GOOS=linux go build -o sqlmapper ./cmd/sqlmapper
+# The library is pure Go: no cgo, no sqlite client, no compiler toolchain in the
+# image. Building the module root would produce an ar archive rather than a
+# binary, so the command package is named explicitly.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/sqlmapper ./cmd/sqlmapper
 
 # Final stage
-FROM debian:bullseye-slim
+FROM alpine:3.20
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 sqlmapper
 
-WORKDIR /app
+WORKDIR /work
 
-# Copy the built application from builder stage
-COPY --from=builder /app/sqlmapper .
-COPY --from=builder /app/examples ./examples
+COPY --from=builder /out/sqlmapper /usr/local/bin/sqlmapper
+COPY --from=builder /app/examples /opt/sqlmapper/examples
 
-# Set environment variables
-ENV PATH="/app:${PATH}"
-ENV SQLMAPPER_LOG_LEVEL=info
+USER sqlmapper
 
-# Run the application
-ENTRYPOINT ["./sqlmapper"]
-CMD ["--help"] 
+# Mount the dump into /work and let the converter write beside it:
+#   docker run --rm -v "$PWD:/work" sqlmapper --file=dump.sql --to=postgres
+ENTRYPOINT ["sqlmapper"]
+CMD ["--help"]

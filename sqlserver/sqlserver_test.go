@@ -127,7 +127,8 @@ CREATE TABLE users (
     id INT PRIMARY KEY,
     name NVARCHAR(100) NOT NULL,
     email NVARCHAR(255) NOT NULL UNIQUE
-);`),
+);
+GO`),
 			wantErr: false,
 		},
 		{
@@ -154,8 +155,11 @@ CREATE TABLE products (
     name NVARCHAR(100) NOT NULL,
     price DECIMAL(10,2)
 );
-CREATE INDEX idx_name ON products(name);
-CREATE UNIQUE INDEX idx_price ON products(price);`),
+GO
+CREATE NONCLUSTERED INDEX idx_name ON products (name);
+GO
+CREATE UNIQUE NONCLUSTERED INDEX idx_price ON products (price);
+GO`),
 			wantErr: false,
 		},
 	}

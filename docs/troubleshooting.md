@@ -1,227 +1,136 @@
-# SQLMapper Troubleshooting Guide
+# Troubleshooting
 
-## Table of Contents
-1. [Common Error Messages](#common-error-messages)
-2. [Database-Specific Issues](#database-specific-issues)
-3. [Performance Issues](#performance-issues)
-4. [Conversion Problems](#conversion-problems)
-5. [CLI Issues](#cli-issues)
+## The CLI
 
-## Common Error Messages
+The whole flag set is four options. Anything else you read elsewhere does not exist.
 
-### "Invalid SQL Syntax"
-**Problem**: SQLMapper fails to parse the input SQL file.
-**Solution**:
-1. Verify the source database type is correctly detected
-2. Check for unsupported SQL features
-3. Remove any database-specific comments or directives
-4. Split complex statements into simpler ones
-
-### "Unsupported Data Type"
-**Problem**: Encountered a data type that doesn't have a direct mapping.
-**Solution**:
-1. Check the data type mapping documentation
-2. Use the `--force-type-mapping` flag with a custom mapping
-3. Modify the source SQL to use a supported type
-4. Implement a custom type converter
-
-### "File Access Error"
-**Problem**: Cannot read input file or write output file.
-**Solution**:
-1. Verify file permissions
-2. Check if the file path is correct
-3. Ensure sufficient disk space
-4. Run the command with appropriate privileges
-
-## Database-Specific Issues
-
-### MySQL Issues
-
-#### Character Set Conversion
-**Problem**: UTF8MB4 character set conversion fails.
-**Solution**:
-```sql
--- Original MySQL
-ALTER TABLE users CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
--- Modified for PostgreSQL
--- Add this before table creation:
-SET client_encoding = 'UTF8';
+```bash
+sqlmapper --file=<path> --to=<target> [--from=<source>] [--out=<path>]
 ```
 
-#### JSON Column Conversion
-**Problem**: JSON columns not properly converted.
-**Solution**:
-```sql
--- MySQL
-ALTER TABLE data MODIFY COLUMN json_col JSON;
+| Flag | Meaning |
+| --- | --- |
+| `--file` | Input SQL dump. Required. |
+| `--to` | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
+| `--from` | Source dialect. Detected from the dump when omitted. |
+| `--out` | Output path. Defaults to `<input>_<target>.sql` beside the input. |
 
--- PostgreSQL equivalent
-ALTER TABLE data ALTER COLUMN json_col TYPE JSONB USING json_col::JSONB;
+Single and double dashes are equivalent, so `-file=dump.sql` and `--file=dump.sql` both work.
 
--- SQLite equivalent (stored as TEXT)
-ALTER TABLE data ALTER COLUMN json_col TEXT;
+There is no debug flag, no config file, no environment variable, and no dry-run mode. If you need any of those, open an issue.
+
+## Common failures
+
+### "could not detect the source database type; pass --from explicitly"
+
+Detection scores the dump against per-dialect markers and needs at least one hit. Short fragments and hand-written schemas frequently have none.
+
+```bash
+sqlmapper --file=schema.sql --from=postgres --to=mysql
 ```
 
-### PostgreSQL Issues
+Always pass `--from` in scripts. Detection is a convenience for interactive use, not something to depend on.
 
-#### Array Type Conversion
-**Problem**: Array types not supported in target database.
-**Solution**:
+### "parse error: error parsing tables: ..."
+
+The parsers are regular-expression based rather than a full SQL grammar. The usual causes:
+
+- A routine body containing the statement delimiter. `CREATE FUNCTION ... BEGIN ... ; ... END;` gets split at the inner semicolon. Extract those statements into their own file.
+- Vendor syntax the pattern does not cover. Reduce the dump to the failing statement to confirm, then open an issue with that fragment.
+
+### The output is missing objects
+
+`Generate` emits tables, columns, constraints, indexes and views. Functions, procedures and triggers are parsed into the schema but not written out, because their bodies are procedural code rather than DDL. Table data is not carried across at all. See [what is not converted](../README.md#what-is-not-converted).
+
+### The generated SQL will not run
+
+Read it before running it. The conversion is best-effort, and the cases below need a human.
+
+## Type conversion notes
+
+### PostgreSQL arrays to MySQL
+
+MySQL has no array type, so an array column becomes `JSON`:
+
 ```sql
 -- PostgreSQL source
-CREATE TABLE items (
-    id SERIAL,
-    tags TEXT[]
-);
+CREATE TABLE items (id bigserial PRIMARY KEY, tags text[]);
 
--- MySQL conversion
-CREATE TABLE items (
-    id INT AUTO_INCREMENT,
-    tags JSON,
-    PRIMARY KEY (id)
-);
-
--- Add migration script:
-INSERT INTO items_new (id, tags)
-SELECT id, JSON_ARRAY(UNNEST(tags)) FROM items;
+-- What SQLMapper produces
+CREATE TABLE items (id BIGINT AUTO_INCREMENT PRIMARY KEY, tags JSON);
 ```
 
-### Oracle Issues
+The schema converts; the data does not. Moving the rows means turning each array into a JSON array yourself.
 
-#### ROWID Handling
-**Problem**: ROWID pseudo-column not supported.
-**Solution**:
+### MySQL ENUM to PostgreSQL
+
+An ENUM column becomes a named type declared ahead of the table:
+
 ```sql
--- Oracle source
-SELECT * FROM employees WHERE ROWID = 'AAASuZAABAAALvVAAA';
+-- MySQL source
+status enum('active','banned') NOT NULL DEFAULT 'active'
 
--- MySQL conversion
-ALTER TABLE employees ADD COLUMN row_identifier BIGINT AUTO_INCREMENT;
+-- What SQLMapper produces
+CREATE TYPE users_status_enum AS ENUM ('active', 'banned');
+...
+status users_status_enum NOT NULL DEFAULT 'active'
+```
 
--- PostgreSQL conversion
+The type is named `<table>_<column>_enum`. Two tables with an identically named ENUM column get two distinct types, which is intentional: their value sets may differ.
+
+### JSON
+
+MySQL `json` becomes PostgreSQL `jsonb` and back. SQLite has no JSON type, so it becomes `TEXT`.
+
+MySQL rejects a literal default on a JSON, TEXT or BLOB column, so a default arriving from another dialect on such a column is dropped rather than emitted as invalid SQL.
+
+### Character sets and collations
+
+Collation and character set clauses are not carried across. `utf8mb4` is close enough to PostgreSQL's UTF8 that nothing needs doing, but if the source database is not UTF-8, convert it before dumping.
+
+### Oracle ROWID
+
+There is no equivalent anywhere else. If your application depends on ROWID, add a surrogate key before migrating:
+
+```sql
+-- MySQL
+ALTER TABLE employees ADD COLUMN row_identifier BIGINT AUTO_INCREMENT UNIQUE;
+
+-- PostgreSQL
 ALTER TABLE employees ADD COLUMN row_identifier BIGSERIAL;
 ```
 
-## Performance Issues
+## Loading the output
 
-### Large File Processing
+### Foreign keys fail because of table order
 
-**Problem**: Memory usage spikes with large SQL files.
-**Solution**:
-1. Use the `--chunk-size` flag to process in smaller batches
-2. Enable streaming mode with `--stream`
-3. Split large files into smaller ones
-4. Use the `--optimize-memory` flag
-
-Example:
-```bash
-sqlmapper --file=large_dump.sql --to=mysql --chunk-size=1000 --optimize-memory
-```
-
-### Slow Conversion Speed
-
-**Problem**: Conversion takes longer than expected.
-**Solution**:
-1. Enable parallel processing:
-```bash
-sqlmapper --file=dump.sql --to=postgres --parallel-workers=4
-```
-
-2. Optimize input SQL:
-```sql
--- Before
-SELECT * FROM large_table WHERE complex_condition;
-
--- After
-SELECT needed_columns FROM large_table WHERE simple_condition;
-```
-
-## Conversion Problems
-
-### Data Loss Prevention
-
-**Problem**: Potential data truncation during conversion.
-**Solution**:
-1. Use the `--strict` flag to fail on potential data loss
-2. Add data validation queries:
+Tables are emitted in the order they appear in the source, which is not necessarily an order that satisfies the foreign keys. Defer the checks around the load:
 
 ```sql
--- Check for oversized data
-SELECT column_name, MAX(LENGTH(column_name)) as max_length
-FROM table_name
-GROUP BY column_name
-HAVING max_length > new_size_limit;
+-- MySQL
+SET FOREIGN_KEY_CHECKS = 0;
+-- ... load ...
+SET FOREIGN_KEY_CHECKS = 1;
 ```
 
-### Constraint Violations
-
-**Problem**: Foreign key constraints fail after conversion.
-**Solution**:
-1. Use `--defer-constraints` flag
-2. Add this to your conversion:
 ```sql
--- At the start
-SET FOREIGN_KEY_CHECKS = 0;  -- MySQL
-SET CONSTRAINTS ALL DEFERRED;  -- PostgreSQL
-
--- At the end
-SET FOREIGN_KEY_CHECKS = 1;  -- MySQL
-SET CONSTRAINTS ALL IMMEDIATE;  -- PostgreSQL
+-- PostgreSQL, inside a transaction
+SET CONSTRAINTS ALL DEFERRED;
+-- ... load ...
 ```
 
-## CLI Issues
+### Checking for truncation before you migrate
 
-### Command Line Arguments
+Type mapping can narrow a column. Check the real widths in the source first:
 
-**Problem**: Incorrect argument format
-**Solution**:
-```bash
-# Incorrect
-sqlmapper -file dump.sql -to mysql
-
-# Correct
-sqlmapper --file=dump.sql --to=mysql
+```sql
+SELECT MAX(LENGTH(email)) FROM users;
 ```
 
-### Environment Setup
+## Large dumps
 
-**Problem**: Path or environment issues
-**Solution**:
-1. Add to PATH:
-```bash
-export PATH=$PATH:/path/to/sqlmapper/bin
-```
+There is no chunking or memory-tuning flag. For a dump too large to hold in memory, use the stream parsers from the library rather than the CLI: see [stream_processing.md](stream_processing.md). The CLI reads the whole file at once.
 
-2. Set required environment variables:
-```bash
-export SQLMAPPER_HOME=/path/to/sqlmapper
-export SQLMAPPER_CONFIG=/path/to/config.json
-```
+## Reporting a bug
 
-### Debug Mode
-
-When encountering unexpected issues:
-```bash
-sqlmapper --file=dump.sql --to=mysql --debug --verbose
-```
-
-This will provide:
-- Detailed error messages
-- Stack traces
-- SQL parsing steps
-- Conversion process logs
-
-### Common Flags Reference
-
-```bash
---file=<path>           # Input SQL file
---to=<database>         # Target database type
---debug                 # Enable debug mode
---verbose              # Detailed output
---strict               # Strict conversion mode
---force                # Ignore non-critical errors
---dry-run              # Preview conversion
---config=<path>        # Custom config file
---output=<path>        # Output file path
-``` 
+The most useful report is the smallest fragment of SQL that reproduces the problem, the exact command, the source and target dialects, and what you expected to come out.

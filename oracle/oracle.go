@@ -11,6 +11,175 @@ import (
 	"github.com/mstgnz/sqlmapper"
 )
 
+// oracleTypeWithLenRe splits an embedded precision off a type, e.g.
+// NUMBER(10,2) or VARCHAR2(255).
+var oracleTypeWithLenRe = regexp.MustCompile(`^(\w+)\s*\(\s*(\d+)(?:\s*,\s*(\d+))?\s*\)$`)
+
+// Real Oracle DDL comes from DBMS_METADATA.GET_DDL, which quotes every
+// identifier, qualifies it with the schema, appends ENABLE to each constraint,
+// and spells identity columns out in full. These patterns strip that back to
+// something the shared schema model can hold.
+var (
+	oracleEnableRe     = regexp.MustCompile(`(?i)\s+(?:ENABLE|DISABLE)\b`)
+	oracleUsingIndexRe = regexp.MustCompile(`(?i)\s+USING\s+INDEX\b`)
+	oracleIdentityRe   = regexp.MustCompile(`(?i)\s*GENERATED\s+(?:ALWAYS|BY\s+DEFAULT(?:\s+ON\s+NULL)?)\s+AS\s+IDENTITY` +
+		`(?:\s*\([^)]*\))?` +
+		`(?:\s+(?:MINVALUE|MAXVALUE|INCREMENT\s+BY|START\s+WITH|CACHE|NOCACHE|ORDER|NOORDER|CYCLE|NOCYCLE|KEEP|NOKEEP|SCALE|NOSCALE|EXTEND|NOEXTEND|SESSION|GLOBAL)(?:\s+-?\d+)?)*`)
+	oracleSpaceBeforeParenRe = regexp.MustCompile(`\s+\(`)
+)
+
+// oracleTypeStopWords marks the tokens that end a type expression and begin the
+// column's attributes.
+var oracleTypeStopWords = map[string]bool{
+	"DEFAULT": true, "NOT": true, "NULL": true, "PRIMARY": true, "UNIQUE": true,
+	"CHECK": true, "REFERENCES": true, "CONSTRAINT": true, "GENERATED": true,
+	"COLLATE": true, "VISIBLE": true, "INVISIBLE": true, "ENABLE": true,
+	"DISABLE": true, "AS": true, "VIRTUAL": true,
+}
+
+// unquoteOracleIdent strips the double quotes DBMS_METADATA wraps around every
+// identifier and undoes Oracle's case folding.
+//
+// Oracle stores an unquoted identifier in upper case, so DBMS_METADATA hands
+// back CUSTOMERS for a table the author wrote as customers. Carrying that upper
+// case forward breaks on MySQL, where names are case sensitive and the view
+// bodies copied out of the same dump still say customers. A name that contains
+// any lower-case letter was quoted at creation time and is left alone.
+func unquoteOracleIdent(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), `"`)
+	if s != "" && s == strings.ToUpper(s) {
+		return strings.ToLower(s)
+	}
+	return s
+}
+
+// splitOracleQualifiedName splits "APP"."CUSTOMERS" into its schema and name.
+func splitOracleQualifiedName(raw string) (schema, name string) {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	for i := range parts {
+		parts[i] = unquoteOracleIdent(parts[i])
+	}
+	if len(parts) > 1 {
+		return parts[0], parts[len(parts)-1]
+	}
+	return "", parts[0]
+}
+
+// takeOracleType returns the leading tokens of rest that make up the type
+// expression. Counting tokens is not enough: DBMS_METADATA writes "TIMESTAMP (6)"
+// with a space, and "INTERVAL DAY TO SECOND" spans four words.
+func takeOracleType(rest string) string {
+	var out []string
+	depth := 0
+	for _, tok := range strings.Fields(rest) {
+		if depth == 0 && oracleTypeStopWords[strings.ToUpper(strings.Trim(tok, ","))] {
+			break
+		}
+		out = append(out, tok)
+		depth += strings.Count(tok, "(") - strings.Count(tok, ")")
+	}
+	return strings.TrimSpace(strings.Join(out, " "))
+}
+
+// normalizeOracleTypeName folds Oracle's type names onto the shared vocabulary
+// the other dialects use, so the existing type maps can pick them up.
+func normalizeOracleTypeName(name string, scale int) string {
+	switch strings.ToUpper(strings.Join(strings.Fields(name), " ")) {
+	case "VARCHAR2", "NVARCHAR2", "VARCHAR":
+		return "varchar"
+	case "CHAR", "NCHAR":
+		return "char"
+	case "CLOB", "NCLOB", "LONG":
+		return "text"
+	case "BLOB", "RAW", "LONG RAW", "BFILE":
+		return "blob"
+	case "BINARY_FLOAT":
+		return "real"
+	case "BINARY_DOUBLE":
+		return "double precision"
+	case "DATE":
+		// An Oracle DATE carries a time component, so it is a timestamp
+		// everywhere else. Mapping it to a bare date would silently drop it.
+		return "timestamp"
+	case "TIMESTAMP":
+		return "timestamp"
+	case "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE":
+		return "timestamp with time zone"
+	case "NUMBER", "NUMERIC", "DECIMAL":
+		if scale > 0 {
+			return "decimal"
+		}
+		return "numeric"
+	case "FLOAT":
+		return "double precision"
+	case "XMLTYPE":
+		return "text"
+	}
+	return strings.ToLower(name)
+}
+
+// applyOracleType fills DataType, Length and Scale from a raw type expression
+// such as "VARCHAR2(255)", "NUMBER(10,2)" or "TIMESTAMP (6)".
+func applyOracleType(col *sqlmapper.Column, typeExpr string) {
+	typeExpr = oracleSpaceBeforeParenRe.ReplaceAllString(strings.TrimSpace(typeExpr), "(")
+
+	if m := oracleTypeWithLenRe.FindStringSubmatch(typeExpr); len(m) > 2 {
+		fmt.Sscanf(m[2], "%d", &col.Length)
+		if m[3] != "" {
+			fmt.Sscanf(m[3], "%d", &col.Scale)
+		}
+		col.DataType = normalizeOracleTypeName(m[1], col.Scale)
+
+		// NUMBER(p) and NUMBER(p,0) are integers, not decimals; TIMESTAMP(6) is
+		// a precision, not a length. Neither should carry a length onwards.
+		switch col.DataType {
+		case "numeric":
+			if col.Scale == 0 {
+				col.DataType = oracleIntegerWidth(col.Length)
+				col.Length = 0
+			}
+		case "timestamp", "timestamp with time zone":
+			col.Length = 0
+		}
+		return
+	}
+
+	col.DataType = normalizeOracleTypeName(typeExpr, 0)
+
+	// An unqualified NUMBER is Oracle's idiomatic surrogate key. Mapping it to
+	// numeric is defensible on paper but makes every foreign key onto an identity
+	// column fail to build, so it becomes an integer here. A column that
+	// genuinely needs scale declares it, and DBMS_METADATA always writes it.
+	if col.DataType == "numeric" {
+		col.DataType = oracleIntegerWidth(0)
+	}
+}
+
+// oracleIntegerWidth picks the narrowest integer type that holds a NUMBER of the
+// given precision. Oracle NUMBER without a precision is unbounded, so it maps to
+// the widest integer available rather than guessing small.
+func oracleIntegerWidth(precision int) string {
+	switch {
+	case precision == 0:
+		return "bigint"
+	case precision <= 4:
+		return "smallint"
+	case precision <= 9:
+		return "int"
+	default:
+		return "bigint"
+	}
+}
+
+// normalizeOracleDDL removes the noise DBMS_METADATA adds around real DDL:
+// trailing ENABLE/DISABLE flags and USING INDEX clauses carry no information the
+// schema model keeps, and both break naive attribute matching.
+func normalizeOracleDDL(stmt string) string {
+	stmt = oracleUsingIndexRe.ReplaceAllString(stmt, "")
+	stmt = oracleEnableRe.ReplaceAllString(stmt, "")
+	return stmt
+}
+
 // Oracle represents an Oracle parser implementation that handles parsing and generating
 // Oracle database schemas. It maintains an internal schema representation and provides
 // methods for converting between Oracle SQL and the common schema format.
@@ -45,7 +214,7 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, errors.New("empty content")
 	}
 
-	// SQL ifadelerini ayır
+	// Split the SQL statements
 	var statements []string
 	var currentStmt strings.Builder
 	lines := strings.Split(content, "\n")
@@ -65,6 +234,11 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		}
 
 		if strings.HasSuffix(line, ";") {
+			// The separator matters here as much as in the branch below: without
+			// it a view header ending in AS was glued to its SELECT.
+			if currentStmt.Len() > 0 {
+				currentStmt.WriteString(" ")
+			}
 			currentStmt.WriteString(line[:len(line)-1])
 			if currentStmt.Len() > 0 {
 				statements = append(statements, currentStmt.String())
@@ -95,6 +269,17 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 				return nil, err
 			}
 			o.schema.Tables = append(o.schema.Tables, table)
+		}
+
+		// CREATE INDEX. Without this branch a standalone CREATE INDEX in the
+		// dump was read and then silently discarded.
+		upperStmt := strings.ToUpper(stmt)
+		if strings.HasPrefix(upperStmt, "CREATE INDEX") ||
+			strings.HasPrefix(upperStmt, "CREATE UNIQUE INDEX") ||
+			strings.HasPrefix(upperStmt, "CREATE BITMAP INDEX") {
+			if err := o.parseIndexes(stmt); err != nil {
+				return nil, err
+			}
 		}
 
 		// CREATE SEQUENCE
@@ -144,65 +329,74 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 	table := sqlmapper.Table{}
 
-	// Tablo adını al
-	tableNameRegex := regexp.MustCompile(`CREATE\s+TABLE\s+(\w+)`)
+	// Read the table name, which may be schema-qualified. Matching only \w
+	// truncated "app.users" to "app", so every schema-qualified table in a dump
+	// came out under the wrong name and nothing could be attached to it.
+	tableNameRegex := regexp.MustCompile(`(?i)CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+([."\w]+)`)
 	matches := tableNameRegex.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
-		table.Name = matches[1]
+		table.Schema, table.Name = splitOracleQualifiedName(matches[1])
 	}
 
-	// Kolonları parse et
+	// Strip the ENABLE / USING INDEX noise DBMS_METADATA appends before looking
+	// at anything inside the table body.
+	stmt = normalizeOracleDDL(stmt)
+
+	// Parse the columns
 	columnsStr := stmt[strings.Index(stmt, "(")+1 : strings.LastIndex(stmt, ")")]
-	columnDefs := strings.Split(columnsStr, ",")
+	// Splitting on every comma would cut a definition in half at the comma inside
+	// NUMBER(10,2) or inside a CHECK list, so the split tracks parentheses and
+	// string literals.
+	columnDefs := splitTopLevelCommas(columnsStr)
 
 	for _, colDef := range columnDefs {
 		colDef = strings.TrimSpace(colDef)
 		if strings.HasPrefix(colDef, "CONSTRAINT") {
 			constraint := sqlmapper.Constraint{}
 
-			// Constraint adını al
-			nameRegex := regexp.MustCompile(`CONSTRAINT\s+(\w+)`)
+			// Read the constraint name
+			nameRegex := regexp.MustCompile(`(?i)CONSTRAINT\s+("?[\w]+"?)`)
 			matches := nameRegex.FindStringSubmatch(colDef)
 			if len(matches) > 1 {
-				constraint.Name = matches[1]
+				constraint.Name = unquoteOracleIdent(matches[1])
 			}
 
 			if strings.Contains(colDef, "PRIMARY KEY") {
 				constraint.Type = "PRIMARY KEY"
-				// Kolonları al
+				// Read the columns
 				colsRegex := regexp.MustCompile(`PRIMARY\s+KEY\s*\(([^)]+)\)`)
 				matches = colsRegex.FindStringSubmatch(colDef)
 				if len(matches) > 1 {
 					cols := strings.Split(matches[1], ",")
 					for i, col := range cols {
-						cols[i] = strings.TrimSpace(col)
+						cols[i] = unquoteOracleIdent(col)
 					}
 					constraint.Columns = cols
 				}
 			} else if strings.Contains(colDef, "FOREIGN KEY") {
 				constraint.Type = "FOREIGN KEY"
-				// FK kolonlarını al
+				// Read the foreign key columns
 				fkRegex := regexp.MustCompile(`FOREIGN\s+KEY\s*\(([^)]+)\)`)
 				matches = fkRegex.FindStringSubmatch(colDef)
 				if len(matches) > 1 {
 					cols := strings.Split(matches[1], ",")
 					for i, col := range cols {
-						cols[i] = strings.TrimSpace(col)
+						cols[i] = unquoteOracleIdent(col)
 					}
 					constraint.Columns = cols
 				}
-				// Referans tabloyu ve kolonları al
-				refRegex := regexp.MustCompile(`REFERENCES\s+(\w+)\s*\(([^)]+)\)`)
+				// Read the referenced table and columns
+				refRegex := regexp.MustCompile(`(?i)REFERENCES\s+([."\w]+)\s*\(([^)]+)\)`)
 				matches = refRegex.FindStringSubmatch(colDef)
 				if len(matches) > 2 {
-					constraint.RefTable = matches[1]
+					_, constraint.RefTable = splitOracleQualifiedName(matches[1])
 					refCols := strings.Split(matches[2], ",")
 					for i, col := range refCols {
-						refCols[i] = strings.TrimSpace(col)
+						refCols[i] = unquoteOracleIdent(col)
 					}
 					constraint.RefColumns = refCols
 				}
-				// ON DELETE kuralını al
+				// Read the ON DELETE rule
 				if strings.Contains(colDef, "ON DELETE") {
 					if strings.Contains(colDef, "CASCADE") {
 						constraint.DeleteRule = "CASCADE"
@@ -210,13 +404,13 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 				}
 			} else if strings.Contains(colDef, "UNIQUE") {
 				constraint.Type = "UNIQUE"
-				// Kolonları al
+				// Read the columns
 				colsRegex := regexp.MustCompile(`UNIQUE\s*\(([^)]+)\)`)
 				matches = colsRegex.FindStringSubmatch(colDef)
 				if len(matches) > 1 {
 					cols := strings.Split(matches[1], ",")
 					for i, col := range cols {
-						cols[i] = strings.TrimSpace(col)
+						cols[i] = unquoteOracleIdent(col)
 					}
 					constraint.Columns = cols
 				}
@@ -239,22 +433,45 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 		}
 
 		col := sqlmapper.Column{
-			Name:     parts[0],
-			DataType: parts[1],
+			Name: unquoteOracleIdent(parts[0]),
+			// Oracle columns are nullable unless the definition says otherwise.
+			// Leaving this at the zero value marked every column NOT NULL.
+			IsNullable: true,
 		}
 
-		if strings.Contains(colDef, "NOT NULL") {
+		// An identity column carries a long option list that would otherwise be
+		// read as part of the type and the default.
+		if oracleIdentityRe.MatchString(colDef) {
+			col.AutoIncrement = true
+			colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
+		}
+
+		rest := strings.TrimSpace(colDef[len(parts[0]):])
+		applyOracleType(&col, takeOracleType(rest))
+
+		if strings.Contains(strings.ToUpper(colDef), "NOT NULL") {
 			col.IsNullable = false
 		}
 
-		if strings.Contains(colDef, "DEFAULT") {
+		if strings.Contains(strings.ToUpper(colDef), "DEFAULT") {
 			defaultIdx := strings.Index(strings.ToUpper(colDef), "DEFAULT")
-			restStr := colDef[defaultIdx+7:]
+			// TrimSpace before looking for the terminator: the character right
+			// after DEFAULT is a space, so searching the untrimmed remainder
+			// found index 0 and every default came out empty.
+			restStr := strings.TrimSpace(colDef[defaultIdx+len("DEFAULT"):])
 			defaultEnd := strings.Index(restStr, " ")
 			if defaultEnd == -1 {
 				defaultEnd = len(restStr)
 			}
 			col.DefaultValue = strings.TrimSpace(restStr[:defaultEnd])
+
+			// SYSDATE and SYSTIMESTAMP are Oracle's now(); quoting them as a
+			// literal produced DEFAULT 'SYSTIMESTAMP', which no other dialect
+			// accepts on a timestamp column.
+			switch strings.ToUpper(col.DefaultValue) {
+			case "SYSDATE", "SYSTIMESTAMP", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CURRENT_DATE":
+				col.DefaultValue = "CURRENT_TIMESTAMP"
+			}
 		}
 
 		if strings.Contains(colDef, "PRIMARY KEY") {
@@ -307,28 +524,39 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 //   - sqlmapper.Sequence: The parsed sequence structure
 //   - error: An error if parsing fails
 func (o *Oracle) parseCreateSequence(stmt string) (sqlmapper.Sequence, error) {
-	seq := sqlmapper.Sequence{}
+	seq := sqlmapper.Sequence{StartValue: 1, IncrementBy: 1}
 
-	// Sequence adını al
-	seqNameRegex := regexp.MustCompile(`CREATE\s+SEQUENCE\s+(\w+)`)
+	// Read the sequence name, which may be schema-qualified.
+	seqNameRegex := regexp.MustCompile(`(?i)CREATE\s+SEQUENCE\s+([.\w]+)`)
 	matches := seqNameRegex.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
 		seq.Name = matches[1]
+		if parts := strings.Split(seq.Name, "."); len(parts) > 1 {
+			seq.Schema = parts[0]
+			seq.Name = parts[1]
+		}
 	}
 
-	// START WITH değerini al
-	startWithRegex := regexp.MustCompile(`START\s+WITH\s+(\d+)`)
-	matches = startWithRegex.FindStringSubmatch(stmt)
-	if len(matches) > 1 {
-		seq.StartValue = 1 // Default değer
+	// Read the options. Each is matched on its own because Oracle does not fix
+	// their order, and the captured value is what gets stored: an earlier
+	// version discarded it and wrote a hardcoded 1, so every sequence came out
+	// as START WITH 1 INCREMENT BY 1 no matter what the source said.
+	readInt := func(pattern string, target *int) {
+		m := regexp.MustCompile(pattern).FindStringSubmatch(stmt)
+		if len(m) > 1 {
+			fmt.Sscanf(m[1], "%d", target)
+		}
 	}
 
-	// INCREMENT BY değerini al
-	incrementByRegex := regexp.MustCompile(`INCREMENT\s+BY\s+(\d+)`)
-	matches = incrementByRegex.FindStringSubmatch(stmt)
-	if len(matches) > 1 {
-		seq.IncrementBy = 1 // Default değer
-	}
+	readInt(`(?i)START\s+WITH\s+(-?\d+)`, &seq.StartValue)
+	readInt(`(?i)INCREMENT\s+BY\s+(-?\d+)`, &seq.IncrementBy)
+	readInt(`(?i)(?:^|\s)MINVALUE\s+(-?\d+)`, &seq.MinValue)
+	readInt(`(?i)(?:^|\s)MAXVALUE\s+(-?\d+)`, &seq.MaxValue)
+	readInt(`(?i)CACHE\s+(-?\d+)`, &seq.Cache)
+
+	upper := strings.ToUpper(stmt)
+	seq.Cycle = strings.Contains(upper, "CYCLE") && !strings.Contains(upper, "NOCYCLE") &&
+		!strings.Contains(upper, "NO CYCLE")
 
 	return seq, nil
 }
@@ -348,14 +576,20 @@ func (o *Oracle) parseCreateSequence(stmt string) (sqlmapper.Sequence, error) {
 func (o *Oracle) parseCreateView(stmt string) (sqlmapper.View, error) {
 	view := sqlmapper.View{}
 
-	// View adını al
-	viewNameRegex := regexp.MustCompile(`CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(\w+)`)
+	// Read the view name. It may be schema-qualified, and the statement may
+	// declare a materialized view, in which case the name sat behind a keyword
+	// the pattern did not allow for and came out empty.
+	// DBMS_METADATA writes "CREATE OR REPLACE FORCE EDITIONABLE VIEW
+	// "APP"."V" ("ID", "EMAIL") AS", so the optional keywords, the quoting and
+	// the column list all have to be allowed for.
+	viewNameRegex := regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?(MATERIALIZED\s+)?VIEW\s+([."\w]+)`)
 	matches := viewNameRegex.FindStringSubmatch(stmt)
-	if len(matches) > 1 {
-		view.Name = matches[1]
+	if len(matches) > 2 {
+		view.IsMaterialized = strings.TrimSpace(matches[1]) != ""
+		view.Schema, view.Name = splitOracleQualifiedName(matches[2])
 	}
 
-	// View tanımını al
+	// Read the view definition
 	asIndex := strings.Index(strings.ToUpper(stmt), " AS ")
 	if asIndex != -1 {
 		view.Definition = strings.TrimSpace(stmt[asIndex+4:])
@@ -381,21 +615,26 @@ func (o *Oracle) parseCreateView(stmt string) (sqlmapper.View, error) {
 func (o *Oracle) parseCreateTrigger(stmt string) (sqlmapper.Trigger, error) {
 	trigger := sqlmapper.Trigger{}
 
-	// Trigger adını al
-	triggerNameRegex := regexp.MustCompile(`CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)`)
+	// Read the trigger name, which may be schema-qualified. Matching only \w
+	// truncated "app.users_bi" to "app".
+	triggerNameRegex := regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([.\w]+)`)
 	matches := triggerNameRegex.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
 		trigger.Name = matches[1]
+		if parts := strings.Split(trigger.Name, "."); len(parts) > 1 {
+			trigger.Schema = parts[0]
+			trigger.Name = parts[1]
+		}
 	}
 
-	// Trigger zamanlamasını al
+	// Read the trigger timing
 	if strings.Contains(strings.ToUpper(stmt), "BEFORE") {
 		trigger.Timing = "BEFORE"
 	} else if strings.Contains(strings.ToUpper(stmt), "AFTER") {
 		trigger.Timing = "AFTER"
 	}
 
-	// Trigger olayını al
+	// Read the trigger event
 	if strings.Contains(strings.ToUpper(stmt), "INSERT") {
 		trigger.Event = "INSERT"
 	} else if strings.Contains(strings.ToUpper(stmt), "UPDATE") {
@@ -404,17 +643,20 @@ func (o *Oracle) parseCreateTrigger(stmt string) (sqlmapper.Trigger, error) {
 		trigger.Event = "DELETE"
 	}
 
-	// Tablo adını al
-	tableRegex := regexp.MustCompile(`ON\s+(\w+)`)
+	// Read the table name, dropping any schema qualifier.
+	tableRegex := regexp.MustCompile(`(?i)\sON\s+([.\w]+)`)
 	matches = tableRegex.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
 		trigger.Table = matches[1]
+		if parts := strings.Split(trigger.Table, "."); len(parts) > 1 {
+			trigger.Table = parts[1]
+		}
 	}
 
-	// FOR EACH ROW kontrolü
+	// Check for FOR EACH ROW
 	trigger.ForEachRow = strings.Contains(strings.ToUpper(stmt), "FOR EACH ROW")
 
-	// Trigger gövdesini al
+	// Read the trigger body
 	beginIndex := strings.Index(strings.ToUpper(stmt), "BEGIN")
 	endIndex := strings.LastIndex(strings.ToUpper(stmt), "END")
 	if beginIndex != -1 && endIndex != -1 {
@@ -451,86 +693,35 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 			seq.Name, seq.StartValue, seq.IncrementBy))
 	}
 
+	// Dump tools do not order tables by dependency, so a child table can precede
+	// its parent and the foreign key would fail to resolve.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+
 	// Create tables
-	for _, table := range schema.Tables {
-		result.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", table.Name))
+	for _, table := range tables {
+		result.WriteString(o.generateTableSQL(table, deferredFKs[table.Name]))
 
-		// Add columns
-		for i, col := range table.Columns {
-			result.WriteString(fmt.Sprintf("    %s %s", col.Name, col.DataType))
-			if col.Length > 0 {
-				if col.Scale > 0 {
-					result.WriteString(fmt.Sprintf("(%d,%d)", col.Length, col.Scale))
-				} else {
-					result.WriteString(fmt.Sprintf("(%d)", col.Length))
-				}
-			}
-			if col.IsPrimaryKey {
-				result.WriteString(" PRIMARY KEY")
-			} else if !col.IsNullable {
-				result.WriteString(" NOT NULL")
-			}
-			if col.DefaultValue != "" {
-				// Add quotes for default values of type String
-				if strings.HasPrefix(col.DataType, "VARCHAR") || strings.HasPrefix(col.DataType, "CHAR") {
-					result.WriteString(fmt.Sprintf(" DEFAULT '%s'", col.DefaultValue))
-				} else {
-					result.WriteString(fmt.Sprintf(" DEFAULT %s", col.DefaultValue))
-				}
-			}
-			if col.IsUnique && !col.IsPrimaryKey {
-				result.WriteString(" UNIQUE")
-			}
-			if i < len(table.Columns)-1 || len(table.Constraints) > 0 {
-				result.WriteString(",")
-			}
-			result.WriteString("\n")
-		}
-
-		// Add Constraint
-		for i, constraint := range table.Constraints {
-			if constraint.Name == "" {
-				continue // Skip unnamed constraints as they are handled with column definitions
-			}
-			result.WriteString(fmt.Sprintf("    CONSTRAINT %s %s", constraint.Name, constraint.Type))
-			if len(constraint.Columns) > 0 {
-				result.WriteString(fmt.Sprintf(" (%s)", strings.Join(constraint.Columns, ", ")))
-			}
-			if constraint.Type == "FOREIGN KEY" && constraint.RefTable != "" {
-				result.WriteString(fmt.Sprintf(" REFERENCES %s", constraint.RefTable))
-				if len(constraint.RefColumns) > 0 {
-					result.WriteString(fmt.Sprintf("(%s)", strings.Join(constraint.RefColumns, ", ")))
-				}
-				if constraint.DeleteRule != "" {
-					result.WriteString(fmt.Sprintf(" ON DELETE %s", constraint.DeleteRule))
-				}
-			}
-			if i < len(table.Constraints)-1 {
-				result.WriteString(",")
-			}
-			result.WriteString("\n")
-		}
-
-		result.WriteString(");\n")
-
-		// Index'leri oluştur
+		// Build the indexes
 		for _, index := range table.Indexes {
-			if index.IsUnique {
-				result.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s(%s);\n",
-					index.Name, table.Name, strings.Join(index.Columns, ", ")))
-			} else {
-				result.WriteString(fmt.Sprintf("CREATE INDEX %s ON %s(%s);\n",
-					index.Name, table.Name, strings.Join(index.Columns, ", ")))
-			}
+			result.WriteString(o.generateIndexSQL(table.Name, index))
+			result.WriteString(";\n")
 		}
 
 		result.WriteString("\n")
 	}
 
+	// Foreign keys that close a cycle cannot be satisfied by ordering, so they
+	// are added once every table exists.
+	for _, table := range tables {
+		for _, c := range deferredFKs[table.Name] {
+			result.WriteString(fmt.Sprintf("ALTER TABLE %s ADD %s;\n\n", table.Name, o.generateConstraintSQL(c)))
+		}
+	}
+
 	// Create views
 	for _, view := range schema.Views {
 		result.WriteString(fmt.Sprintf("CREATE OR REPLACE VIEW %s AS\n%s;\n\n",
-			view.Name, view.Definition))
+			view.Name, toOracleExpression(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"))))
 	}
 
 	// Create triggers
@@ -805,12 +996,12 @@ func (o *Oracle) parseTypes(statement string) error {
 }
 
 func (o *Oracle) parseIndexes(statement string) error {
-	re := regexp.MustCompile(`CREATE(?:\s+UNIQUE|\s+BITMAP)?\s+INDEX\s+([.\w]+)\s+ON\s+([.\w]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+(\w+))?`)
+	re := regexp.MustCompile(`(?i)CREATE(?:\s+UNIQUE|\s+BITMAP)?\s+INDEX\s+([."\w]+)\s+ON\s+([."\w]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+(\w+))?`)
 	matches := re.FindStringSubmatch(statement)
 
 	if len(matches) > 3 {
-		indexName := matches[1]
-		tableName := matches[2]
+		_, indexName := splitOracleQualifiedName(matches[1])
+		_, tableName := splitOracleQualifiedName(matches[2])
 		columns := strings.Split(matches[3], ",")
 
 		// Find the table
@@ -825,7 +1016,7 @@ func (o *Oracle) parseIndexes(statement string) error {
 
 				// Clean column names
 				for j, col := range columns {
-					index.Columns[j] = strings.TrimSpace(col)
+					index.Columns[j] = unquoteOracleIdent(col)
 				}
 
 				// Parse tablespace if exists
@@ -872,43 +1063,267 @@ func (o *Oracle) generateTypeSQL(typ sqlmapper.Type) string {
 }
 
 // generateTableSQL generates SQL for a table
-func (o *Oracle) generateTableSQL(table sqlmapper.Table) string {
-	sql := "CREATE TABLE " + table.Name + " (\n"
+// toOracleType maps the shared type vocabulary onto Oracle's own types. Oracle
+// has no boolean, no native JSON column and no TEXT, so those fold onto the
+// nearest thing it does have.
+var toOracleType = map[string]string{
+	"varchar": "VARCHAR2", "character varying": "VARCHAR2", "char": "CHAR",
+	"text": "CLOB", "tinytext": "CLOB", "mediumtext": "CLOB", "longtext": "CLOB",
+	"smallint": "NUMBER(5)", "int": "NUMBER(10)", "integer": "NUMBER(10)",
+	"mediumint": "NUMBER(8)", "bigint": "NUMBER(19)", "tinyint": "NUMBER(3)",
+	"decimal": "NUMBER", "numeric": "NUMBER",
+	"real": "BINARY_FLOAT", "float": "BINARY_FLOAT", "double": "BINARY_DOUBLE",
+	"double precision": "BINARY_DOUBLE",
+	"boolean":          "NUMBER(1)", "bool": "NUMBER(1)", "bit": "NUMBER(1)",
+	"date": "DATE", "time": "TIMESTAMP", "timestamp": "TIMESTAMP",
+	"datetime": "TIMESTAMP", "timestamptz": "TIMESTAMP WITH TIME ZONE",
+	"timestamp with time zone": "TIMESTAMP WITH TIME ZONE",
+	"json":                     "CLOB", "jsonb": "CLOB", "xml": "XMLTYPE",
+	"blob": "BLOB", "bytea": "BLOB", "tinyblob": "BLOB", "mediumblob": "BLOB",
+	"longblob": "BLOB", "binary": "BLOB", "varbinary": "BLOB",
+	"uuid": "VARCHAR2(36)", "inet": "VARCHAR2(45)", "cidr": "VARCHAR2(45)",
+	"macaddr": "VARCHAR2(17)", "interval": "INTERVAL DAY TO SECOND",
+	"enum": "VARCHAR2(255)", "set": "VARCHAR2(255)",
+	"serial": "NUMBER(10)", "bigserial": "NUMBER(19)", "smallserial": "NUMBER(5)",
+}
 
-	// Generate columns
-	for i, col := range table.Columns {
-		sql += "    " + col.Name + " " + col.DataType
-		if col.Length > 0 {
-			sql += fmt.Sprintf("(%d", col.Length)
-			if col.Scale > 0 {
-				sql += fmt.Sprintf(",%d", col.Scale)
-			}
-			sql += ")"
-		}
+// oracleNoLengthTypes never take a length, either because Oracle forbids it or
+// because the mapping already carries one.
+var oracleNoLengthTypes = map[string]bool{
+	"CLOB": true, "BLOB": true, "DATE": true, "TIMESTAMP": true,
+	"TIMESTAMP WITH TIME ZONE": true, "XMLTYPE": true, "BINARY_FLOAT": true,
+	"BINARY_DOUBLE": true, "INTERVAL DAY TO SECOND": true,
+}
 
-		if !col.IsNullable {
-			sql += " NOT NULL"
-		}
-		if col.IsUnique {
-			sql += " UNIQUE"
-		}
-		if col.DefaultValue != "" {
-			sql += " DEFAULT " + col.DefaultValue
-		}
+// toOracleExpression rewrites an expression borrowed from another dialect:
+// their default schema qualifiers do not resolve here.
+func toOracleExpression(expr string) string {
+	expr = oraclePGCastRe.ReplaceAllString(expr, "")
+	expr = oracleForeignSchemaRe.ReplaceAllString(expr, "")
+	return strings.TrimSpace(expr)
+}
 
-		if i < len(table.Columns)-1 {
-			sql += ",\n"
-		}
+// oraclePGCastRe matches PostgreSQL's ::type cast suffix, which Oracle rejects.
+var oraclePGCastRe = regexp.MustCompile(`::\s*[a-zA-Z_][\w]*(\s+[a-zA-Z_][\w]*)*(\s*\(\s*\d+(\s*,\s*\d+)?\s*\))?(\s*\[\s*\])?`)
+
+// oracleForeignSchemaRe matches the default schema qualifier of the other
+// dialects. Only those two names are stripped, so alias.column survives.
+var oracleForeignSchemaRe = regexp.MustCompile(`(?i)\b(?:public|dbo)\.`)
+
+// resolveType maps a column onto the Oracle type it should be declared as.
+func (o *Oracle) resolveType(col sqlmapper.Column) string {
+	lower := strings.ToLower(strings.TrimSpace(col.DataType))
+
+	// Oracle has no array type; a serialised value in a CLOB is the closest it
+	// gets without inventing a nested table.
+	if col.IsArray {
+		return "CLOB"
 	}
 
-	sql += "\n)"
+	mapped, ok := toOracleType[lower]
+	if !ok {
+		// Already an Oracle type, or something we do not know: pass it through.
+		mapped = strings.ToUpper(col.DataType)
+	}
 
-	// Add table options
-	if table.TableSpace != "" {
-		sql += " TABLESPACE " + table.TableSpace
+	if col.Length > 0 && !oracleNoLengthTypes[mapped] && !strings.Contains(mapped, "(") {
+		if col.Scale > 0 {
+			return fmt.Sprintf("%s(%d,%d)", mapped, col.Length, col.Scale)
+		}
+		return fmt.Sprintf("%s(%d)", mapped, col.Length)
+	}
+	return mapped
+}
+
+// generateColumnSQL renders one column. inlinePK reports whether this column
+// carries the PRIMARY KEY marker itself.
+func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK bool) string {
+	oracleType := o.resolveType(col)
+	sql := col.Name + " " + oracleType
+
+	if col.DefaultValue != "" && !col.AutoIncrement {
+		sql += " DEFAULT " + o.defaultLiteral(col, oracleType)
+	}
+
+	// Oracle wants the identity clause after the type and before the
+	// constraints; it also implies NOT NULL.
+	if col.AutoIncrement {
+		sql += " GENERATED BY DEFAULT AS IDENTITY"
+	}
+
+	if inlinePK {
+		sql += " PRIMARY KEY"
+	} else if !col.IsNullable && !col.AutoIncrement {
+		sql += " NOT NULL"
+	}
+	if col.IsUnique && !inlinePK {
+		sql += " UNIQUE"
 	}
 
 	return sql
+}
+
+// defaultLiteral renders a column default the way Oracle expects it.
+func (o *Oracle) defaultLiteral(col sqlmapper.Column, oracleType string) string {
+	dv := strings.TrimSpace(col.DefaultValue)
+
+	// Oracle has no boolean, so a boolean default has to become the number the
+	// column is now declared as.
+	if strings.HasPrefix(oracleType, "NUMBER(1)") {
+		switch strings.ToLower(strings.Trim(dv, "'")) {
+		case "true", "t", "yes", "1":
+			return "1"
+		case "false", "f", "no", "0":
+			return "0"
+		}
+	}
+
+	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
+		return "SYSTIMESTAMP"
+	}
+	if isNumericLiteral(dv) {
+		return dv
+	}
+	if strings.ContainsAny(dv, "()") {
+		return toOracleExpression(dv)
+	}
+	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
+}
+
+// isNumericLiteral reports whether s looks like a bare number.
+func isNumericLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// generateConstraintSQL renders a table constraint.
+func (o *Oracle) generateConstraintSQL(c sqlmapper.Constraint) string {
+	var sb strings.Builder
+	if c.Name != "" {
+		sb.WriteString("CONSTRAINT " + c.Name + " ")
+	}
+	switch c.Type {
+	case "PRIMARY KEY":
+		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+	case "UNIQUE":
+		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+	case "FOREIGN KEY":
+		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
+		// Oracle supports ON DELETE CASCADE and SET NULL only; it has no
+		// ON UPDATE action at all, so those are dropped rather than emitted
+		// as syntax it would reject.
+		switch strings.ToUpper(c.DeleteRule) {
+		case "CASCADE":
+			sb.WriteString(" ON DELETE CASCADE")
+		case "SET NULL":
+			sb.WriteString(" ON DELETE SET NULL")
+		}
+	case "CHECK":
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", toOracleExpression(c.CheckExpression)))
+	}
+	return sb.String()
+}
+
+// generateTableSQL creates a CREATE TABLE statement with its columns and
+// constraints. deferred lists the foreign keys that must be added afterwards.
+func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Constraint) string {
+	var result strings.Builder
+	result.WriteString("CREATE TABLE " + table.Name + " (\n")
+
+	// A single-column PK on an identity column reads better inline; every other
+	// PK is emitted as a table-level constraint. Exactly one of the two must
+	// fire, or Oracle rejects the table with two primary keys.
+	inlinePKCols := map[string]bool{}
+	var tableConstraints []sqlmapper.Constraint
+	for _, c := range table.Constraints {
+		switch c.Type {
+		case "PRIMARY KEY":
+			if len(c.Columns) == 1 && columnIsAutoIncrement(table, c.Columns[0]) && c.Name == "" {
+				inlinePKCols[c.Columns[0]] = true
+				continue
+			}
+			tableConstraints = append(tableConstraints, c)
+		case "FOREIGN KEY":
+			if isDeferred(deferred, c) {
+				continue
+			}
+			tableConstraints = append(tableConstraints, c)
+		case "CHECK":
+			// MariaDB emulates a JSON column with LONGTEXT plus a json_valid()
+			// guard. Oracle has no such function, and the column maps to a CLOB
+			// here, so the check would only break the load.
+			if sqlmapper.IsJSONEmulationCheck(c.CheckExpression) {
+				continue
+			}
+			tableConstraints = append(tableConstraints, c)
+		case "UNIQUE":
+			tableConstraints = append(tableConstraints, c)
+		}
+	}
+
+	hasPKConstraint := false
+	for _, c := range tableConstraints {
+		if c.Type == "PRIMARY KEY" {
+			hasPKConstraint = true
+		}
+	}
+	if !hasPKConstraint && len(inlinePKCols) == 0 {
+		for _, col := range table.Columns {
+			if col.IsPrimaryKey {
+				inlinePKCols[col.Name] = true
+			}
+		}
+	}
+
+	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
+	for _, col := range table.Columns {
+		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name]))
+	}
+	for _, c := range tableConstraints {
+		if sql := o.generateConstraintSQL(c); sql != "" {
+			parts = append(parts, "    "+sql)
+		}
+	}
+
+	result.WriteString(strings.Join(parts, ",\n"))
+	result.WriteString("\n)")
+	if table.TableSpace != "" {
+		result.WriteString(" TABLESPACE " + table.TableSpace)
+	}
+	result.WriteString(";\n")
+	return result.String()
+}
+
+// columnIsAutoIncrement reports whether the named column is auto-increment.
+func columnIsAutoIncrement(table sqlmapper.Table, name string) bool {
+	for _, col := range table.Columns {
+		if col.Name == name {
+			return col.AutoIncrement
+		}
+	}
+	return false
+}
+
+// isDeferred reports whether a constraint is in the deferred set.
+func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
+	for _, d := range deferred {
+		if d.Name != "" && d.Name == c.Name {
+			return true
+		}
+		if d.Name == "" && c.Name == "" && d.RefTable == c.RefTable &&
+			strings.Join(d.Columns, ",") == strings.Join(c.Columns, ",") {
+			return true
+		}
+	}
+	return false
 }
 
 // generateIndexSQL generates SQL for an index
@@ -930,4 +1345,42 @@ func (o *Oracle) generateIndexSQL(tableName string, index sqlmapper.Index) strin
 	}
 
 	return sql
+}
+
+// splitTopLevelCommas splits a CREATE TABLE body on the commas that separate
+// definitions, ignoring the ones nested inside parentheses or string literals.
+func splitTopLevelCommas(body string) []string {
+	var parts []string
+	depth := 0
+	inString := false
+	start := 0
+
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\'':
+			if inString && i+1 < len(body) && body[i+1] == '\'' {
+				i++
+				continue
+			}
+			inString = !inString
+		case '(':
+			if !inString {
+				depth++
+			}
+		case ')':
+			if !inString {
+				depth--
+			}
+		case ',':
+			if !inString && depth == 0 {
+				parts = append(parts, body[start:i])
+				start = i + 1
+			}
+		}
+	}
+
+	if start < len(body) {
+		parts = append(parts, body[start:])
+	}
+	return parts
 }

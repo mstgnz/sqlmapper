@@ -79,7 +79,7 @@ func TestMySQL_Parse(t *testing.T) {
 				ALTER TABLE employees RENAME TO staff;`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// ALTER komutları şu an için parse edilmiyor
+				// ALTER statements are not parsed yet
 			},
 		},
 		{
@@ -89,7 +89,7 @@ func TestMySQL_Parse(t *testing.T) {
 				DROP TABLE employees CASCADE;`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// DROP komutları şu an için parse edilmiyor
+				// DROP statements are not parsed yet
 			},
 		},
 		{
@@ -101,7 +101,7 @@ func TestMySQL_Parse(t *testing.T) {
 				CREATE FULLTEXT INDEX idx_employee_bio ON employees(bio);`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// Index'ler tabloya bağlı olduğu için önce tablo oluşturulmalı
+				// Indexes attach to a table, so the table has to be created first
 			},
 		},
 		{
@@ -219,7 +219,7 @@ func TestMySQL_Parse(t *testing.T) {
 					(2, 'Bob Wilson');`,
 			wantErr: false,
 			validate: func(t *testing.T, schema *sqlmapper.Schema) {
-				// INSERT komutları şu an için parse edilmiyor
+				// INSERT statements are not parsed yet
 			},
 		},
 	}

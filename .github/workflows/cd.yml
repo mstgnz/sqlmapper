@@ -9,14 +9,16 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: "1.23"
 
@@ -24,79 +26,35 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test -v ./...
+        run: go test -race -v ./...
 
+      # The package path matters: building the module root compiles the library
+      # and writes an ar archive, so the release used to ship files that were
+      # not executables at all.
       - name: Build
         run: |
-          GOOS=linux GOARCH=amd64 go build -o sqlmapper-linux-amd64
-          GOOS=darwin GOARCH=amd64 go build -o sqlmapper-darwin-amd64
-          GOOS=windows GOARCH=amd64 go build -o sqlmapper-windows-amd64.exe
+          GOOS=linux GOARCH=amd64 go build -o sqlmapper-linux-amd64 ./cmd/sqlmapper
+          GOOS=linux GOARCH=arm64 go build -o sqlmapper-linux-arm64 ./cmd/sqlmapper
+          GOOS=darwin GOARCH=amd64 go build -o sqlmapper-darwin-amd64 ./cmd/sqlmapper
+          GOOS=darwin GOARCH=arm64 go build -o sqlmapper-darwin-arm64 ./cmd/sqlmapper
+          GOOS=windows GOARCH=amd64 go build -o sqlmapper-windows-amd64.exe ./cmd/sqlmapper
+          file sqlmapper-linux-amd64
 
-      - name: Generate changelog
-        id: changelog
-        uses: actions/github-script@v6
+      # actions/create-release and actions/upload-release-asset are archived by
+      # GitHub and no longer maintained; this action replaces both and uploads
+      # every artifact in one step.
+      - name: Create release
+        uses: softprops/action-gh-release@v2
         with:
-          script: |
-            const { data: releases } = await github.rest.repos.listReleases({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            })
-            const previous = releases[0]?.tag_name
-            const current = context.ref.replace('refs/tags/', '')
-            const { data: commits } = await github.rest.repos.compareCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              base: previous || '',
-              head: current,
-            })
-            const changelog = commits.commits
-              .map(commit => `- ${commit.commit.message}`)
-              .join('\n')
-            return changelog
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          body: |
-            Changes in this Release:
-            ${{ steps.changelog.outputs.result }}
+          generate_release_notes: true
           draft: false
           prerelease: false
-
-      - name: Upload Linux Binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sqlmapper-linux-amd64
-          asset_name: sqlmapper-linux-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload macOS Binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sqlmapper-darwin-amd64
-          asset_name: sqlmapper-darwin-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload Windows Binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sqlmapper-windows-amd64.exe
-          asset_name: sqlmapper-windows-amd64.exe
-          asset_content_type: application/octet-stream
+          files: |
+            sqlmapper-linux-amd64
+            sqlmapper-linux-arm64
+            sqlmapper-darwin-amd64
+            sqlmapper-darwin-arm64
+            sqlmapper-windows-amd64.exe
 
   docker:
     name: Push Docker image
@@ -104,19 +62,19 @@ jobs:
     needs: release
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true

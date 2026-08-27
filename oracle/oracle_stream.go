@@ -3,6 +3,7 @@ package oracle
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -16,6 +17,10 @@ type OracleStreamParser struct {
 }
 
 // NewOracleStreamParser creates a new Oracle stream parser
+// oracleStreamIndexRe reads a standalone CREATE INDEX statement, which the whole-file
+// parser cannot do because it resolves the target table first.
+var oracleStreamIndexRe = regexp.MustCompile(`(?i)CREATE(?:\s+(UNIQUE)|\s+(BITMAP))?\s+INDEX\s+([.\w]+)\s+ON\s+([.\w]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+(\w+))?`)
+
 func NewOracleStreamParser() *OracleStreamParser {
 	return &OracleStreamParser{
 		oracle: NewOracle().(*Oracle),
@@ -39,9 +44,10 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		if statement == "" {
 			continue
 		}
+		dispatch := dispatchKey(statement)
 
 		// Parse CREATE TABLE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
+		if strings.HasPrefix(dispatch, "CREATE TABLE") {
 			table, err := p.parseTableStatement(statement)
 			if err != nil {
 				return err
@@ -58,8 +64,8 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE VIEW statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE VIEW") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE MATERIALIZED VIEW") {
+		if strings.HasPrefix(dispatch, "CREATE VIEW") ||
+			strings.HasPrefix(dispatch, "CREATE MATERIALIZED VIEW") {
 			view, err := p.parseViewStatement(statement)
 			if err != nil {
 				return err
@@ -76,7 +82,7 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE FUNCTION statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE FUNCTION") {
+		if strings.HasPrefix(dispatch, "CREATE FUNCTION") {
 			function, err := p.parseFunctionStatement(statement)
 			if err != nil {
 				return err
@@ -93,7 +99,7 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE PROCEDURE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE PROCEDURE") {
+		if strings.HasPrefix(dispatch, "CREATE PROCEDURE") {
 			procedure, err := p.parseProcedureStatement(statement)
 			if err != nil {
 				return err
@@ -110,7 +116,7 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE TRIGGER statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TRIGGER") {
+		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
 			trigger, err := p.parseTriggerStatement(statement)
 			if err != nil {
 				return err
@@ -127,7 +133,7 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE SEQUENCE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE SEQUENCE") {
+		if strings.HasPrefix(dispatch, "CREATE SEQUENCE") {
 			sequence, err := p.parseSequenceStatement(statement)
 			if err != nil {
 				return err
@@ -144,7 +150,7 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE TYPE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TYPE") {
+		if strings.HasPrefix(dispatch, "CREATE TYPE") {
 			typ, err := p.parseTypeStatement(statement)
 			if err != nil {
 				return err
@@ -161,9 +167,9 @@ func (p *OracleStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE INDEX statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE UNIQUE INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE BITMAP INDEX") {
+		if strings.HasPrefix(dispatch, "CREATE INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE UNIQUE INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE BITMAP INDEX") {
 			index, err := p.parseIndexStatement(statement)
 			if err != nil {
 				return err
@@ -254,7 +260,7 @@ func (p *OracleStreamParser) ParseStreamParallel(reader io.Reader, callback func
 
 // parseStatement parses a single SQL statement and returns a SchemaObject
 func (p *OracleStreamParser) parseStatement(statement string) (*stream.SchemaObject, error) {
-	upperStatement := strings.ToUpper(statement)
+	upperStatement := dispatchKey(statement)
 
 	switch {
 	case strings.HasPrefix(upperStatement, "CREATE TABLE"):
@@ -347,9 +353,11 @@ func (p *OracleStreamParser) parseStatement(statement string) (*stream.SchemaObj
 // parseTableStatement parses a CREATE TABLE statement
 func (p *OracleStreamParser) parseTableStatement(statement string) (*sqlmapper.Table, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseTables(statement); err != nil {
+	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -363,9 +371,11 @@ func (p *OracleStreamParser) parseTableStatement(statement string) (*sqlmapper.T
 // parseViewStatement parses a CREATE VIEW statement
 func (p *OracleStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseViews(statement); err != nil {
+	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -379,9 +389,11 @@ func (p *OracleStreamParser) parseViewStatement(statement string) (*sqlmapper.Vi
 // parseFunctionStatement parses a CREATE FUNCTION statement
 func (p *OracleStreamParser) parseFunctionStatement(statement string) (*sqlmapper.Function, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -401,9 +413,11 @@ func (p *OracleStreamParser) parseFunctionStatement(statement string) (*sqlmappe
 // parseProcedureStatement parses a CREATE PROCEDURE statement
 func (p *OracleStreamParser) parseProcedureStatement(statement string) (*sqlmapper.Procedure, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -429,9 +443,11 @@ func (p *OracleStreamParser) parseProcedureStatement(statement string) (*sqlmapp
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *OracleStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseTriggers(statement); err != nil {
+	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -445,9 +461,11 @@ func (p *OracleStreamParser) parseTriggerStatement(statement string) (*sqlmapper
 // parseSequenceStatement parses a CREATE SEQUENCE statement
 func (p *OracleStreamParser) parseSequenceStatement(statement string) (*sqlmapper.Sequence, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseSequences(statement); err != nil {
+	if err := localParser.parseSequences(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -461,9 +479,11 @@ func (p *OracleStreamParser) parseSequenceStatement(statement string) (*sqlmappe
 // parseTypeStatement parses a CREATE TYPE statement
 func (p *OracleStreamParser) parseTypeStatement(statement string) (*sqlmapper.Type, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &Oracle{schema: tempSchema}
 
-	if err := p.oracle.parseTypes(statement); err != nil {
+	if err := localParser.parseTypes(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -476,18 +496,24 @@ func (p *OracleStreamParser) parseTypeStatement(statement string) (*sqlmapper.Ty
 
 // parseIndexStatement parses a CREATE INDEX statement
 func (p *OracleStreamParser) parseIndexStatement(statement string) (*sqlmapper.Index, error) {
-	tempSchema := &sqlmapper.Schema{}
-	p.oracle.schema = tempSchema
-
-	if err := p.oracle.parseIndexes(statement); err != nil {
-		return nil, err
-	}
-
-	if len(tempSchema.Tables) == 0 || len(tempSchema.Tables[0].Indexes) == 0 {
+	// parseIndexes attaches the index to a table that is already present in the
+	// schema, which never holds for a single statement read off the stream, so
+	// the statement is read directly here.
+	m := oracleStreamIndexRe.FindStringSubmatch(ensureTerminated(statement))
+	if len(m) < 6 {
 		return nil, fmt.Errorf("no index found in statement")
 	}
 
-	return &tempSchema.Tables[0].Indexes[0], nil
+	index := &sqlmapper.Index{
+		Name:     m[3],
+		Columns:  splitAndTrimColumns(m[5]),
+		IsUnique: strings.TrimSpace(m[1]) != "",
+		IsBitmap: strings.TrimSpace(m[2]) != "",
+	}
+	if len(m) > 6 {
+		index.TableSpace = m[6]
+	}
+	return index, nil
 }
 
 // GenerateStream implements the StreamParser interface
@@ -513,8 +539,11 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	}
 
 	// Write tables
-	for _, table := range schema.Tables {
-		stmt := p.oracle.generateTableSQL(table)
+	// Order the tables the same way Generate does, so a streamed schema loads
+	// even when the source listed a child table before its parent.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+	for _, table := range tables {
+		stmt := p.oracle.generateTableSQL(table, deferredFKs[table.Name])
 		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
 			return err
 		}
@@ -580,4 +609,39 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	}
 
 	return nil
+}
+
+// ensureTerminated prepares a single statement handed over by the stream reader
+// for the whole-file parsers. Those parsers run after a normalisation pass that
+// collapses whitespace and they anchor several patterns on the trailing
+// delimiter, both of which a raw statement is missing.
+func ensureTerminated(statement string) string {
+	s := strings.Join(strings.Fields(statement), " ")
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, ";") {
+		return s
+	}
+	return s + ";"
+}
+
+// splitAndTrimColumns splits a comma-separated column list and trims each entry.
+func splitAndTrimColumns(s string) []string {
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
+// object keyword.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+
+// dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
+// FUNCTION" shifts every fixed prefix, so the optional keywords are folded away
+// once here rather than doubling every case in the dispatch.
+func dispatchKey(statement string) string {
+	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
 }

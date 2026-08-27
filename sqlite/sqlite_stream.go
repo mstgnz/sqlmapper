@@ -3,6 +3,7 @@ package sqlite
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -16,6 +17,10 @@ type SQLiteStreamParser struct {
 }
 
 // NewSQLiteStreamParser creates a new SQLite stream parser
+// sqliteStreamIndexRe reads a standalone CREATE INDEX statement, which the whole-file
+// parser cannot do because it resolves the target table first.
+var sqliteStreamIndexRe = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+ON\s+([.\w]+)\s*\((.*?)\)`)
+
 func NewSQLiteStreamParser() *SQLiteStreamParser {
 	return &SQLiteStreamParser{
 		sqlite: NewSQLite().(*SQLite),
@@ -39,9 +44,10 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		if statement == "" {
 			continue
 		}
+		dispatch := dispatchKey(statement)
 
 		// Parse CREATE TABLE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
+		if strings.HasPrefix(dispatch, "CREATE TABLE") {
 			table, err := p.parseTableStatement(statement)
 			if err != nil {
 				return err
@@ -58,7 +64,7 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE VIEW statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE VIEW") {
+		if strings.HasPrefix(dispatch, "CREATE VIEW") {
 			view, err := p.parseViewStatement(statement)
 			if err != nil {
 				return err
@@ -75,8 +81,8 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE INDEX statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE INDEX") ||
-			strings.HasPrefix(strings.ToUpper(statement), "CREATE UNIQUE INDEX") {
+		if strings.HasPrefix(dispatch, "CREATE INDEX") ||
+			strings.HasPrefix(dispatch, "CREATE UNIQUE INDEX") {
 			index, err := p.parseIndexStatement(statement)
 			if err != nil {
 				return err
@@ -93,7 +99,7 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		}
 
 		// Parse CREATE TRIGGER statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TRIGGER") {
+		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
 			trigger, err := p.parseTriggerStatement(statement)
 			if err != nil {
 				return err
@@ -184,7 +190,7 @@ func (p *SQLiteStreamParser) ParseStreamParallel(reader io.Reader, callback func
 
 // parseStatement parses a single SQL statement and returns a SchemaObject
 func (p *SQLiteStreamParser) parseStatement(statement string) (*stream.SchemaObject, error) {
-	upperStatement := strings.ToUpper(statement)
+	upperStatement := dispatchKey(statement)
 
 	switch {
 	case strings.HasPrefix(upperStatement, "CREATE TABLE"):
@@ -207,7 +213,8 @@ func (p *SQLiteStreamParser) parseStatement(statement string) (*stream.SchemaObj
 			Data: view,
 		}, nil
 
-	case strings.HasPrefix(upperStatement, "CREATE INDEX"):
+	case strings.HasPrefix(upperStatement, "CREATE INDEX"),
+		strings.HasPrefix(upperStatement, "CREATE UNIQUE INDEX"):
 		index, err := p.parseIndexStatement(statement)
 		if err != nil {
 			return nil, err
@@ -283,9 +290,11 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 // parseTableStatement parses a CREATE TABLE statement
 func (p *SQLiteStreamParser) parseTableStatement(statement string) (*sqlmapper.Table, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlite.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLite{schema: tempSchema}
 
-	if err := p.sqlite.parseTables(statement); err != nil {
+	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -299,9 +308,11 @@ func (p *SQLiteStreamParser) parseTableStatement(statement string) (*sqlmapper.T
 // parseViewStatement parses a CREATE VIEW statement
 func (p *SQLiteStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlite.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLite{schema: tempSchema}
 
-	if err := p.sqlite.parseViews(statement); err != nil {
+	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -314,26 +325,30 @@ func (p *SQLiteStreamParser) parseViewStatement(statement string) (*sqlmapper.Vi
 
 // parseIndexStatement parses a CREATE INDEX statement
 func (p *SQLiteStreamParser) parseIndexStatement(statement string) (*sqlmapper.Index, error) {
-	tempSchema := &sqlmapper.Schema{}
-	p.sqlite.schema = tempSchema
-
-	if err := p.sqlite.parseIndexes(statement); err != nil {
-		return nil, err
-	}
-
-	if len(tempSchema.Tables) == 0 || len(tempSchema.Tables[0].Indexes) == 0 {
+	// parseIndexes attaches the index to a table that is already present in the
+	// schema, which never holds for a single statement read off the stream, so
+	// the statement is read directly here.
+	m := sqliteStreamIndexRe.FindStringSubmatch(ensureTerminated(statement))
+	if len(m) < 5 {
 		return nil, fmt.Errorf("no index found in statement")
 	}
 
-	return &tempSchema.Tables[0].Indexes[0], nil
+	index := &sqlmapper.Index{
+		Name:     m[2],
+		Columns:  (&SQLite{}).splitAndTrim(m[4]),
+		IsUnique: strings.TrimSpace(m[1]) != "",
+	}
+	return index, nil
 }
 
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *SQLiteStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
 	tempSchema := &sqlmapper.Schema{}
-	p.sqlite.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &SQLite{schema: tempSchema}
 
-	if err := p.sqlite.parseTriggers(statement); err != nil {
+	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
 		return nil, err
 	}
 
@@ -342,4 +357,30 @@ func (p *SQLiteStreamParser) parseTriggerStatement(statement string) (*sqlmapper
 	}
 
 	return &tempSchema.Triggers[0], nil
+}
+
+// ensureTerminated prepares a single statement handed over by the stream reader
+// for the whole-file parsers. Those parsers run after a normalisation pass that
+// collapses whitespace and they anchor several patterns on the trailing
+// delimiter, both of which a raw statement is missing.
+func ensureTerminated(statement string) string {
+	s := strings.Join(strings.Fields(statement), " ")
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, ";") {
+		return s
+	}
+	return s + ";"
+}
+
+// orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
+// object keyword.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+
+// dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
+// FUNCTION" shifts every fixed prefix, so the optional keywords are folded away
+// once here rather than doubling every case in the dispatch.
+func dispatchKey(statement string) string {
+	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
 }

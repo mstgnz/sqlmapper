@@ -3,6 +3,7 @@ package mysql
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -39,9 +40,10 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		if statement == "" {
 			continue
 		}
+		dispatch := dispatchKey(statement)
 
 		// Parse CREATE TABLE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
+		if strings.HasPrefix(dispatch, "CREATE TABLE") {
 			table, err := p.parseTableStatement(statement)
 			if err != nil {
 				return err
@@ -58,7 +60,7 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		}
 
 		// Parse CREATE VIEW statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE VIEW") {
+		if strings.HasPrefix(dispatch, "CREATE VIEW") {
 			view, err := p.parseViewStatement(statement)
 			if err != nil {
 				return err
@@ -75,7 +77,7 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		}
 
 		// Parse CREATE FUNCTION statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE FUNCTION") {
+		if strings.HasPrefix(dispatch, "CREATE FUNCTION") {
 			function, err := p.parseFunctionStatement(statement)
 			if err != nil {
 				return err
@@ -92,7 +94,7 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		}
 
 		// Parse CREATE PROCEDURE statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE PROCEDURE") {
+		if strings.HasPrefix(dispatch, "CREATE PROCEDURE") {
 			procedure, err := p.parseProcedureStatement(statement)
 			if err != nil {
 				return err
@@ -109,7 +111,7 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		}
 
 		// Parse CREATE TRIGGER statements
-		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TRIGGER") {
+		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
 			trigger, err := p.parseTriggerStatement(statement)
 			if err != nil {
 				return err
@@ -200,7 +202,7 @@ func (p *MySQLStreamParser) ParseStreamParallel(reader io.Reader, callback func(
 
 // parseStatement parses a single SQL statement and returns a SchemaObject
 func (p *MySQLStreamParser) parseStatement(statement string) (*stream.SchemaObject, error) {
-	upperStatement := strings.ToUpper(statement)
+	upperStatement := dispatchKey(statement)
 
 	switch {
 	case strings.HasPrefix(upperStatement, "CREATE TABLE"):
@@ -242,6 +244,16 @@ func (p *MySQLStreamParser) parseStatement(statement string) (*stream.SchemaObje
 			Type: stream.ProcedureObject,
 			Data: procedure,
 		}, nil
+
+	case strings.HasPrefix(upperStatement, "CREATE TRIGGER"):
+		trigger, err := p.parseTriggerStatement(statement)
+		if err != nil {
+			return nil, err
+		}
+		return &stream.SchemaObject{
+			Type: stream.TriggerObject,
+			Data: trigger,
+		}, nil
 	}
 
 	return nil, nil
@@ -253,9 +265,11 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 		return fmt.Errorf("schema cannot be nil")
 	}
 
-	// Write tables
-	for _, table := range schema.Tables {
-		stmt := p.mysql.generateTableSQL(table)
+	// Write tables, ordered the same way Generate orders them so a streamed
+	// schema loads even when the source listed a child table before its parent.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+	for _, table := range tables {
+		stmt := p.mysql.generateTableSQL(table, deferredFKs[table.Name])
 		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
 			return err
 		}
@@ -264,6 +278,16 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 		for _, index := range table.Indexes {
 			stmt := p.mysql.generateIndexSQL(table.Name, index)
 			if _, err := writer.Write([]byte(stmt + ";\n")); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Foreign keys that close a cycle are added once every table exists.
+	for _, table := range tables {
+		for _, c := range deferredFKs[table.Name] {
+			stmt := fmt.Sprintf("ALTER TABLE %s ADD %s;\n", table.Name, p.mysql.generateConstraintSQL(c))
+			if _, err := writer.Write([]byte(stmt)); err != nil {
 				return err
 			}
 		}
@@ -327,10 +351,12 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 func (p *MySQLStreamParser) parseTableStatement(statement string) (*sqlmapper.Table, error) {
 	// Create a temporary schema for parsing
 	tempSchema := &sqlmapper.Schema{}
-	p.mysql.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &MySQL{schema: tempSchema}
 
 	// Parse the table using the existing MySQL parser
-	if err := p.mysql.parseTables(statement); err != nil {
+	if err := localParser.parseTables(localParser.normalizeContent(ensureTerminated(statement))); err != nil {
 		return nil, err
 	}
 
@@ -347,10 +373,12 @@ func (p *MySQLStreamParser) parseTableStatement(statement string) (*sqlmapper.Ta
 func (p *MySQLStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
 	// Create a temporary schema for parsing
 	tempSchema := &sqlmapper.Schema{}
-	p.mysql.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &MySQL{schema: tempSchema}
 
 	// Parse the view using the existing MySQL parser
-	if err := p.mysql.parseViews(statement); err != nil {
+	if err := localParser.parseViews(localParser.normalizeContent(ensureTerminated(statement))); err != nil {
 		return nil, err
 	}
 
@@ -367,10 +395,12 @@ func (p *MySQLStreamParser) parseViewStatement(statement string) (*sqlmapper.Vie
 func (p *MySQLStreamParser) parseFunctionStatement(statement string) (*sqlmapper.Function, error) {
 	// Create a temporary schema for parsing
 	tempSchema := &sqlmapper.Schema{}
-	p.mysql.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &MySQL{schema: tempSchema}
 
 	// Parse the function using the existing MySQL parser
-	if err := p.mysql.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(localParser.normalizeContent(ensureTerminated(statement))); err != nil {
 		return nil, err
 	}
 
@@ -387,10 +417,12 @@ func (p *MySQLStreamParser) parseFunctionStatement(statement string) (*sqlmapper
 func (p *MySQLStreamParser) parseProcedureStatement(statement string) (*sqlmapper.Procedure, error) {
 	// Create a temporary schema for parsing
 	tempSchema := &sqlmapper.Schema{}
-	p.mysql.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &MySQL{schema: tempSchema}
 
 	// Parse the procedure using the existing MySQL parser
-	if err := p.mysql.parseFunctions(statement); err != nil {
+	if err := localParser.parseFunctions(localParser.normalizeContent(ensureTerminated(statement))); err != nil {
 		return nil, err
 	}
 
@@ -419,10 +451,12 @@ func (p *MySQLStreamParser) parseProcedureStatement(statement string) (*sqlmappe
 func (p *MySQLStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
 	// Create a temporary schema for parsing
 	tempSchema := &sqlmapper.Schema{}
-	p.mysql.schema = tempSchema
+	// A parser per statement: stream parsers are used concurrently and
+	// must not share mutable state through the embedded dialect parser.
+	localParser := &MySQL{schema: tempSchema}
 
 	// Parse the trigger using the existing MySQL parser
-	if err := p.mysql.parseTriggers(statement); err != nil {
+	if err := localParser.parseTriggers(localParser.normalizeContent(ensureTerminated(statement))); err != nil {
 		return nil, err
 	}
 
@@ -433,4 +467,30 @@ func (p *MySQLStreamParser) parseTriggerStatement(statement string) (*sqlmapper.
 
 	// Return the first trigger
 	return &tempSchema.Triggers[0], nil
+}
+
+// ensureTerminated prepares a single statement handed over by the stream reader
+// for the whole-file parsers. Those parsers run after a normalisation pass that
+// collapses whitespace and they anchor several patterns on the trailing
+// delimiter, both of which a raw statement is missing.
+func ensureTerminated(statement string) string {
+	s := strings.Join(strings.Fields(statement), " ")
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, ";") {
+		return s
+	}
+	return s + ";"
+}
+
+// orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
+// object keyword.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+
+// dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
+// FUNCTION" shifts every fixed prefix, so the optional keywords are folded away
+// once here rather than doubling every case in the dispatch.
+func dispatchKey(statement string) string {
+	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
 }

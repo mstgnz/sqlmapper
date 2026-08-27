@@ -11,70 +11,231 @@ import (
 	"github.com/mstgnz/sqlmapper"
 )
 
-// MySQL represents a MySQL parser implementation that handles parsing and generating
-// MySQL database schemas. It maintains an internal schema representation and provides
-// methods for converting between MySQL SQL and the common schema format.
+// toMySQLType maps any source database type (MySQL or PostgreSQL) to the MySQL equivalent.
+// This is used during Generate to convert parsed schemas to valid MySQL SQL.
+var toMySQLType = map[string]string{
+	// MySQL native types (passthrough)
+	"tinyint":    "tinyint",
+	"smallint":   "smallint",
+	"mediumint":  "mediumint",
+	"int":        "int",
+	"bigint":     "bigint",
+	"float":      "float",
+	"double":     "double",
+	"decimal":    "decimal",
+	"numeric":    "decimal",
+	"char":       "char",
+	"varchar":    "varchar",
+	"tinytext":   "tinytext",
+	"text":       "text",
+	"mediumtext": "mediumtext",
+	"longtext":   "longtext",
+	"json":       "json",
+	"datetime":   "datetime",
+	"date":       "date",
+	"time":       "time",
+	"blob":       "blob",
+	"tinyblob":   "tinyblob",
+	"mediumblob": "mediumblob",
+	"longblob":   "longblob",
+	"enum":       "enum",
+	"set":        "set",
+	"bool":       "tinyint(1)",
+	"boolean":    "tinyint(1)",
+	"bit":        "bit",
+	"year":       "year",
+	"timestamp":  "datetime",
+	// PostgreSQL types → MySQL equivalents
+	"integer":                     "int",
+	"serial":                      "int",
+	"bigserial":                   "bigint",
+	"smallserial":                 "smallint",
+	"real":                        "float",
+	"double precision":            "double",
+	"character varying":           "varchar",
+	"character":                   "char",
+	"bytea":                       "blob",
+	"jsonb":                       "json",
+	"uuid":                        "varchar(36)",
+	"inet":                        "varchar(45)",
+	"cidr":                        "varchar(45)",
+	"macaddr":                     "varchar(17)",
+	"interval":                    "varchar(255)",
+	"point":                       "point",
+	"line":                        "linestring",
+	"lseg":                        "linestring",
+	"box":                         "polygon",
+	"path":                        "linestring",
+	"polygon":                     "polygon",
+	"circle":                      "polygon",
+	"timestamptz":                 "datetime",
+	"timestamp with time zone":    "datetime",
+	"timestamp without time zone": "datetime",
+}
+
+// Package-level compiled regexes for performance.
+var (
+	mysqlCommentRe      = regexp.MustCompile(`(?m)--.*$|#.*$`)
+	mysqlDelimiterRe    = regexp.MustCompile(`(?i)DELIMITER\s+[^\s]+`)
+	mysqlWhitespaceRe   = regexp.MustCompile(`\s+`)
+	mysqlConditionalRe  = regexp.MustCompile(`(?s)/\*!.*?\*/`) // /*!40101 SET ... */
+	mysqlBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)  // /* regular block comments */
+	mysqlLockRe         = regexp.MustCompile(`(?i)LOCK\s+TABLES\s+[^;]+;`)
+	mysqlUnlockRe       = regexp.MustCompile(`(?i)UNLOCK\s+TABLES\s*;`)
+	mysqlDBRe           = regexp.MustCompile(`(?i)CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)`)
+	mysqlIndexRe        = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?(?:FULLTEXT\s+)?INDEX\s+(\w+)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)`)
+	mysqlViewRe         = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+` + "`?" + `([\w.]+)` + "`?" + `\s+AS\s+(.*?);`)
+	mysqlFuncRe         = regexp.MustCompile(`(?i)CREATE\s+FUNCTION\s+([\w.]+)\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+BEGIN\s+(.*?)\s+END`)
+	mysqlProcRe         = regexp.MustCompile(`(?i)CREATE\s+PROCEDURE\s+([\w.]+)\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
+	mysqlTriggerRe      = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
+	mysqlGrantRe        = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+([\w.*]+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
+	mysqlGrantProcRe    = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:PROCEDURE|FUNCTION)\s+(\w+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
+	mysqlRevokeRe       = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+([\w.*]+)\s+FROM\s+'([^']+)'@'([^']+)';`)
+	mysqlTableCommentRe = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+` + "`?" + `([\w.]+)` + "`?" + `\s+COMMENT\s*=\s*'([^']+)';`)
+	mysqlColCommentRe   = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+` + "`?" + `([\w.]+)` + "`?" + `\s+MODIFY\s+COLUMN\s+(\w+)[^']+COMMENT\s*'([^']+)';`)
+	mysqlEnumValuesRe   = regexp.MustCompile(`(?i)(ENUM|SET)\s*\(([^)]+)\)`)
+	mysqlEnumItemRe     = regexp.MustCompile(`'([^']*)'`)
+	mysqlTypeWithLenRe  = regexp.MustCompile(`^(\w+)\s*\((\d+)(?:\s*,\s*(\d+))?\)$`)
+	mysqlCheckRe        = regexp.MustCompile(`(?i)CHECK\s*\((.*)\)`)
+	mysqlConstraintRe   = regexp.MustCompile(`(?i)CONSTRAINT\s+` + "`?" + `(\w+)` + "`?" + `\s+(.*)`)
+	mysqlPKRe           = regexp.MustCompile(`(?i)PRIMARY\s+KEY\s*\(([^)]+)\)`)
+	mysqlFKRe           = regexp.MustCompile(`(?i)FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\(([^)]+)\)`)
+	mysqlUniqueRe       = regexp.MustCompile(`(?i)UNIQUE\s*(?:KEY\s+\w+\s*)?\(([^)]+)\)`)
+)
+
+// mysqlDefaultStopWords marks the tokens that end a DEFAULT clause. NULL is
+// absent on purpose: "DEFAULT NULL" is a value, not an attribute. ON is present
+// so that "DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP" does not read the update
+// trigger as the column's default.
+var mysqlDefaultStopWords = map[string]bool{
+	"ON": true, "NOT": true, "AUTO_INCREMENT": true, "COMMENT": true,
+	"PRIMARY": true, "UNIQUE": true, "CHECK": true, "REFERENCES": true,
+	"COLLATE": true, "CHARACTER": true, "GENERATED": true, "STORAGE": true,
+	"VIRTUAL": true, "STORED": true, "INVISIBLE": true,
+}
+
+// mysqlPGCastRe matches PostgreSQL's ::type cast suffix, which is meaningless in
+// MySQL and has to be stripped from any expression copied across.
+var mysqlPGCastRe = regexp.MustCompile(`::\s*[a-zA-Z_][\w]*(\s+[a-zA-Z_][\w]*)*(\s*\(\s*\d+(\s*,\s*\d+)?\s*\))?(\s*\[\s*\])?`)
+
+// mysqlPGPublicRe matches the default schema qualifier of the other dialects.
+// Only those two names are stripped: a general schema.table rewrite would also
+// eat legitimate alias.column references inside a view body.
+var mysqlPGPublicRe = regexp.MustCompile(`(?i)\b(?:public|dbo)\.`)
+
+// takeUntilStopWord returns the leading tokens of s up to the first stop word
+// that appears at paren depth zero and outside a string literal.
+func takeUntilStopWord(s string, stop map[string]bool) string {
+	var out []string
+	depth := 0
+	inString := false
+	for _, tok := range strings.Fields(s) {
+		if depth == 0 && !inString && stop[strings.ToUpper(tok)] {
+			break
+		}
+		out = append(out, tok)
+		for _, ch := range tok {
+			switch ch {
+			case '\'':
+				inString = !inString
+			case '(':
+				if !inString {
+					depth++
+				}
+			case ')':
+				if !inString {
+					depth--
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, " "))
+}
+
+// isDeferred reports whether a constraint is in the deferred set, matched on
+// name when there is one and on shape otherwise.
+func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
+	for _, d := range deferred {
+		if d.Name != "" && d.Name == c.Name {
+			return true
+		}
+		if d.Name == "" && c.Name == "" && d.RefTable == c.RefTable &&
+			strings.Join(d.Columns, ",") == strings.Join(c.Columns, ",") {
+			return true
+		}
+	}
+	return false
+}
+
+// stripSchemaPrefix reduces "schema.table" to "table"; MySQL resolves unqualified
+// names through the active database and a PostgreSQL "public." prefix would break
+// the reference outright.
+func stripSchemaPrefix(name string) string {
+	name = strings.TrimSpace(strings.Trim(name, `"`))
+	if parts := strings.Split(name, "."); len(parts) > 1 {
+		return strings.Trim(parts[len(parts)-1], `"`)
+	}
+	return name
+}
+
+// toMySQLExpression rewrites an expression borrowed from another dialect into
+// something MySQL will accept: PostgreSQL casts are dropped and the outer pair of
+// redundant parentheses is left intact for the caller to wrap.
+func toMySQLExpression(expr string) string {
+	expr = mysqlPGCastRe.ReplaceAllString(expr, "")
+	expr = mysqlPGPublicRe.ReplaceAllString(expr, "")
+	return strings.TrimSpace(expr)
+}
+
+// columnIsAutoIncrement reports whether the named column of table is an
+// auto-increment column.
+func columnIsAutoIncrement(table sqlmapper.Table, name string) bool {
+	for _, col := range table.Columns {
+		if col.Name == name {
+			return col.AutoIncrement
+		}
+	}
+	return false
+}
+
+// MySQL represents a MySQL parser implementation.
 type MySQL struct {
 	schema *sqlmapper.Schema
 }
 
 // NewMySQL creates and initializes a new MySQL parser instance.
-// It returns a parser that can handle MySQL specific SQL syntax and schema structures.
 func NewMySQL() sqlmapper.Database {
 	return &MySQL{
 		schema: &sqlmapper.Schema{},
 	}
 }
 
-// Parse takes a MySQL SQL dump content and parses it into a common schema structure.
-// It processes various MySQL objects including:
-// - Databases and schemas
-// - Tables with columns and constraints
-// - Indexes (including PRIMARY, UNIQUE, and FULLTEXT)
-// - Views
-// - Stored procedures and functions
-// - Triggers
-// - User privileges
-//
-// Parameters:
-//   - content: The MySQL SQL dump content to parse
-//
-// Returns:
-//   - *sqlmapper.Schema: The parsed schema structure
-//   - error: An error if parsing fails
+// Parse takes a MySQL SQL dump and parses it into a common schema structure.
 func (m *MySQL) Parse(content string) (*sqlmapper.Schema, error) {
 	if content == "" {
 		return nil, errors.New("empty content")
 	}
 
-	// Normalize content
 	content = m.normalizeContent(content)
 
-	// Parse schema objects
 	if err := m.parseSchemas(content); err != nil {
 		return nil, fmt.Errorf("error parsing schemas: %v", err)
 	}
-
 	if err := m.parseTables(content); err != nil {
 		return nil, fmt.Errorf("error parsing tables: %v", err)
 	}
-
 	if err := m.parseIndexes(content); err != nil {
 		return nil, fmt.Errorf("error parsing indexes: %v", err)
 	}
-
 	if err := m.parseViews(content); err != nil {
 		return nil, fmt.Errorf("error parsing views: %v", err)
 	}
-
 	if err := m.parseFunctions(content); err != nil {
 		return nil, fmt.Errorf("error parsing functions: %v", err)
 	}
-
 	if err := m.parseTriggers(content); err != nil {
 		return nil, fmt.Errorf("error parsing triggers: %v", err)
 	}
-
 	if err := m.parsePermissions(content); err != nil {
 		return nil, fmt.Errorf("error parsing permissions: %v", err)
 	}
@@ -82,20 +243,8 @@ func (m *MySQL) Parse(content string) (*sqlmapper.Schema, error) {
 	return m.schema, nil
 }
 
-// Generate creates a MySQL SQL dump from a schema structure.
-// It generates SQL statements for all database objects in the schema, including:
-// - Tables with columns, indexes, and constraints
-// - Views
-// - Stored procedures and functions
-// - Triggers
-// - User privileges
-//
-// Parameters:
-//   - schema: The schema structure to convert to MySQL SQL
-//
-// Returns:
-//   - string: The generated MySQL SQL statements
-//   - error: An error if generation fails
+// Generate creates MySQL SQL from a schema structure.
+// It applies type mapping so it correctly handles schemas parsed from PostgreSQL.
 func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	if schema == nil {
 		return "", errors.New("empty schema")
@@ -103,163 +252,188 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	var result strings.Builder
 
-	// Generate table creation
-	for i, table := range schema.Tables {
-		result.WriteString(m.generateTableSQL(table))
-		if i < len(schema.Tables)-1 {
+	// Dump tools do not order tables by dependency, so a child table can precede
+	// its parent and the foreign key would fail to resolve.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+
+	for i, table := range tables {
+		result.WriteString(m.generateTableSQL(table, deferredFKs[table.Name]))
+		if i < len(tables)-1 {
 			result.WriteString("\n\n")
 		}
 
-		// Generate indexes for this table
 		if len(table.Indexes) > 0 {
 			result.WriteString("\n")
-			for j, index := range table.Indexes {
+			for _, index := range table.Indexes {
 				result.WriteString(m.generateIndexSQL(table.Name, index))
-				if j < len(table.Indexes)-1 {
-					result.WriteString("\n")
-				}
+				result.WriteString("\n")
 			}
 		}
+	}
+
+	// Foreign keys that close a cycle cannot be satisfied by ordering, so they
+	// are added once every table exists.
+	for _, table := range tables {
+		for _, c := range deferredFKs[table.Name] {
+			result.WriteString(fmt.Sprintf("\nALTER TABLE %s ADD %s;\n", table.Name, m.generateConstraintSQL(c)))
+		}
+	}
+
+	// Views are emitted last so the tables they select from already exist. The
+	// body is carried over verbatim: this package converts DDL structure, not
+	// query syntax, so a view written in another dialect's SQL may need editing.
+	for _, view := range schema.Views {
+		result.WriteString("\n")
+		result.WriteString(m.generateViewSQL(view))
+		result.WriteString("\n")
 	}
 
 	return result.String(), nil
 }
 
-// normalizeContent preprocesses the SQL content by removing comments and normalizing whitespace.
-// It handles MySQL specific comment styles (-- and #) and DELIMITER statements.
-//
-// Parameters:
-//   - content: The SQL content to normalize
-//
-// Returns:
-//   - string: The normalized SQL content
+// generateViewSQL renders a view definition. The SELECT body is passed through
+// unchanged; only the wrapper is dialect-specific. MySQL has no materialized
+// views, so one arriving from PostgreSQL or Oracle degrades to a plain view.
+func (m *MySQL) generateViewSQL(view sqlmapper.View) string {
+	body := toMySQLExpression(strings.TrimSpace(view.Definition))
+	body = strings.TrimSuffix(body, ";")
+	return fmt.Sprintf("CREATE VIEW %s AS %s;", stripSchemaPrefix(view.Name), body)
+}
+
+// normalizeContent preprocesses SQL by removing comments, DELIMITER statements,
+// backtick quoting, and normalizing whitespace.
 func (m *MySQL) normalizeContent(content string) string {
-	// Remove comments
-	re := regexp.MustCompile(`--.*$|#.*$`)
-	content = re.ReplaceAllString(content, "")
-
-	// Remove DELIMITER statements
-	content = regexp.MustCompile(`DELIMITER\s+[^\s]+`).ReplaceAllString(content, "")
-
-	// Normalize whitespace
+	// Strip mysqldump conditional comments first (/*!40101 SET ... */)
+	content = mysqlConditionalRe.ReplaceAllString(content, "")
+	// Strip regular block comments
+	content = mysqlBlockCommentRe.ReplaceAllString(content, "")
+	// Strip line comments (-- and #)
+	content = mysqlCommentRe.ReplaceAllString(content, "")
+	// Strip DELIMITER statements
+	content = mysqlDelimiterRe.ReplaceAllString(content, "")
+	// Strip LOCK/UNLOCK TABLES (mysqldump artifact)
+	content = mysqlLockRe.ReplaceAllString(content, "")
+	content = mysqlUnlockRe.ReplaceAllString(content, "")
+	// Strip backticks – MySQL dumps quote everything; we work without them internally
+	content = strings.ReplaceAll(content, "`", "")
 	content = strings.TrimSpace(content)
-	content = regexp.MustCompile(`\s+`).ReplaceAllString(content, " ")
-
+	content = mysqlWhitespaceRe.ReplaceAllString(content, " ")
 	return content
 }
 
-// parseSchemas extracts database definitions from the SQL content.
-// It handles CREATE DATABASE and USE statements.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parseSchemas(content string) error {
-	// Parse CREATE DATABASE
-	dbRe := regexp.MustCompile(`CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)`)
-	if matches := dbRe.FindStringSubmatch(content); len(matches) > 1 {
+	if matches := mysqlDBRe.FindStringSubmatch(content); len(matches) > 1 {
 		m.schema.Name = matches[1]
 	}
-
 	return nil
 }
 
-// parseTables extracts table definitions from the SQL content.
-// It processes table structure including columns, indexes, constraints,
-// and table options like ENGINE, CHARSET, and COLLATE.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
+var mysqlCreateTableRe = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w.]+)\s*\(`)
+
 func (m *MySQL) parseTables(content string) error {
-	re := regexp.MustCompile(`CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s*\((.*?)\)(?:\s+ENGINE\s*=\s*\w+)?(?:\s+DEFAULT\s+CHARSET\s*=\s*\w+)?(?:\s+COLLATE\s*=\s*\w+)?;`)
-	matches := re.FindAllStringSubmatch(content, -1)
+	// Split into statements first to prevent the regex from greedily matching
+	// across multiple CREATE TABLE blocks.
+	statements := strings.Split(content, ";")
+	for _, stmt := range statements {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		loc := mysqlCreateTableRe.FindStringSubmatchIndex(stmt)
+		if loc == nil {
+			continue
+		}
+		tableName := stmt[loc[2]:loc[3]]
+		openParen := loc[1] - 1
 
-	for _, match := range matches {
-		if len(match) > 2 {
-			tableName := match[1]
-			columnDefs := match[2]
+		body, _ := extractBalancedParens(stmt, openParen)
+		if body == "" {
+			continue
+		}
 
-			table := sqlmapper.Table{}
+		table := sqlmapper.Table{}
+		if parts := strings.Split(tableName, "."); len(parts) > 1 {
+			table.Schema = parts[0]
+			table.Name = parts[1]
+		} else {
+			table.Name = tableName
+		}
 
-			// Parse schema if exists
-			parts := strings.Split(tableName, ".")
-			if len(parts) > 1 {
-				table.Schema = parts[0]
-				table.Name = parts[1]
-			} else {
-				table.Name = tableName
-			}
+		if err := m.parseColumnsAndConstraints(body, &table); err != nil {
+			return err
+		}
 
-			// Parse columns and constraints
-			if err := m.parseColumnsAndConstraints(columnDefs, &table); err != nil {
-				return err
-			}
+		// Table-level comment via ALTER TABLE (search in full content)
+		if cm := mysqlTableCommentRe.FindStringSubmatch(content); len(cm) > 2 && cm[1] == tableName {
+			table.Comment = cm[2]
+		}
 
-			// Parse table comment
-			tableCommentRe := regexp.MustCompile(`ALTER\s+TABLE\s+` + regexp.QuoteMeta(tableName) + `\s+COMMENT\s*=\s*'([^']+)';`)
-			if tableCommentMatch := tableCommentRe.FindStringSubmatch(content); len(tableCommentMatch) > 1 {
-				table.Comment = tableCommentMatch[1]
-			}
-
-			// Parse column comments
-			commentRe := regexp.MustCompile(`ALTER\s+TABLE\s+` + regexp.QuoteMeta(tableName) + `\s+MODIFY\s+COLUMN\s+(\w+)[^']+COMMENT\s*'([^']+)';`)
-			commentMatches := commentRe.FindAllStringSubmatch(content, -1)
-			for _, commentMatch := range commentMatches {
-				if len(commentMatch) > 2 {
-					columnName := commentMatch[1]
-					comment := commentMatch[2]
-					for i := range table.Columns {
-						if table.Columns[i].Name == columnName {
-							table.Columns[i].Comment = comment
-							break
-						}
+		// Column comments via ALTER TABLE MODIFY COLUMN
+		for _, cc := range mysqlColCommentRe.FindAllStringSubmatch(content, -1) {
+			if len(cc) > 3 && cc[1] == tableName {
+				for i := range table.Columns {
+					if table.Columns[i].Name == cc[2] {
+						table.Columns[i].Comment = cc[3]
+						break
 					}
 				}
 			}
-
-			// Set column order
-			for i := range table.Columns {
-				table.Columns[i].Order = i + 1
-			}
-
-			m.schema.Tables = append(m.schema.Tables, table)
 		}
-	}
 
+		for i := range table.Columns {
+			table.Columns[i].Order = i + 1
+		}
+		m.schema.Tables = append(m.schema.Tables, table)
+	}
 	return nil
 }
 
-// parseColumnsAndConstraints processes column and constraint definitions within a table.
-// It handles various column attributes and both inline and table-level constraints.
-//
-// Parameters:
-//   - columnDefs: The column definitions string to parse
-//   - table: The table structure to populate
-//
-// Returns:
-//   - error: An error if parsing fails
-func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.Table) error {
-	// Split column definitions
-	defs := strings.Split(columnDefs, ",")
-	var currentDef strings.Builder
-	var finalDefs []string
+// extractBalancedParens finds the content between matching parentheses starting at openIdx.
+func extractBalancedParens(s string, openIdx int) (string, int) {
+	if openIdx >= len(s) || s[openIdx] != '(' {
+		return "", -1
+	}
+	depth := 0
+	inString := false
+	for i := openIdx; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if ch == '\'' {
+				inString = false
+			}
+		} else {
+			switch ch {
+			case '\'':
+				inString = true
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					return s[openIdx+1 : i], i
+				}
+			}
+		}
+	}
+	return "", -1
+}
 
-	// Handle nested parentheses in CHECK constraints
+// parseColumnsAndConstraints splits a CREATE TABLE body and processes each part.
+func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.Table) error {
+	defs := strings.Split(columnDefs, ",")
+	var finalDefs []string
+	var current strings.Builder
 	parenCount := 0
+
 	for _, def := range defs {
 		parenCount += strings.Count(def, "(") - strings.Count(def, ")")
 		if parenCount > 0 {
-			currentDef.WriteString(def + ",")
+			current.WriteString(def + ",")
 		} else {
-			if currentDef.Len() > 0 {
-				currentDef.WriteString(def)
-				finalDefs = append(finalDefs, currentDef.String())
-				currentDef.Reset()
+			if current.Len() > 0 {
+				current.WriteString(def)
+				finalDefs = append(finalDefs, current.String())
+				current.Reset()
 			} else {
 				finalDefs = append(finalDefs, def)
 			}
@@ -268,18 +442,37 @@ func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.T
 
 	for _, def := range finalDefs {
 		def = strings.TrimSpace(def)
-
-		// Skip empty definitions
 		if def == "" {
 			continue
 		}
 
-		// Parse constraints
-		if strings.HasPrefix(strings.ToUpper(def), "CONSTRAINT") ||
-			(strings.Contains(strings.ToUpper(def), "PRIMARY KEY") && !strings.Contains(strings.ToUpper(def), "AUTO_INCREMENT")) ||
-			strings.Contains(strings.ToUpper(def), "FOREIGN KEY") ||
-			(strings.Contains(strings.ToUpper(def), "UNIQUE") && !strings.Contains(strings.ToUpper(def), " ")) ||
-			(strings.Contains(strings.ToUpper(def), "CHECK") && !strings.Contains(strings.ToUpper(def), " ")) {
+		defUpper := strings.ToUpper(def)
+
+		// KEY idx_name (col1, col2) → regular index inside CREATE TABLE (mysqldump style)
+		if strings.HasPrefix(defUpper, "KEY ") || strings.HasPrefix(defUpper, "INDEX ") {
+			// Extract optional index name and columns
+			// Formats: KEY idx_name (cols)  or  KEY (cols)  or  INDEX idx_name (cols)
+			keyRe := regexp.MustCompile(`(?i)(?:KEY|INDEX)\s+(\w+)?\s*\(([^)]+)\)`)
+			if km := keyRe.FindStringSubmatch(def); len(km) > 2 {
+				idx := sqlmapper.Index{
+					Columns: splitAndTrim(km[2]),
+				}
+				if km[1] != "" {
+					idx.Name = km[1]
+				}
+				table.Indexes = append(table.Indexes, idx)
+			}
+			continue
+		}
+
+		// Detect table-level constraints
+		isConstraint := strings.HasPrefix(defUpper, "CONSTRAINT") ||
+			strings.HasPrefix(defUpper, "PRIMARY KEY") ||
+			strings.HasPrefix(defUpper, "FOREIGN KEY") ||
+			strings.HasPrefix(defUpper, "UNIQUE") ||
+			strings.HasPrefix(defUpper, "CHECK")
+
+		if isConstraint {
 			constraint, err := m.parseConstraint(def)
 			if err != nil {
 				return err
@@ -288,41 +481,39 @@ func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.T
 			continue
 		}
 
-		// Parse column
+		// Column definition
 		if strings.Contains(def, " ") {
 			column, err := m.parseColumn(def)
 			if err != nil {
 				return err
 			}
-			table.Columns = append(table.Columns, column)
 
-			// Check for inline constraints
-			if strings.Contains(strings.ToUpper(def), "PRIMARY KEY") {
+			// Inline PRIMARY KEY
+			if strings.Contains(defUpper, "PRIMARY KEY") {
+				column.IsPrimaryKey = true
+				column.IsNullable = false
 				table.Constraints = append(table.Constraints, sqlmapper.Constraint{
 					Type:    "PRIMARY KEY",
 					Columns: []string{column.Name},
 				})
-				column.IsPrimaryKey = true
-				column.IsNullable = false
 			}
-			if strings.Contains(strings.ToUpper(def), "UNIQUE") {
-				table.Constraints = append(table.Constraints, sqlmapper.Constraint{
-					Type:    "UNIQUE",
-					Columns: []string{column.Name},
-				})
+			// Inline UNIQUE
+			if strings.Contains(defUpper, "UNIQUE") {
 				column.IsUnique = true
 			}
-			if strings.Contains(strings.ToUpper(def), "CHECK") {
-				re := regexp.MustCompile(`CHECK\s*\((.*?)\)`)
-				if matches := re.FindStringSubmatch(def); len(matches) > 1 {
+			// Inline CHECK
+			if strings.Contains(defUpper, "CHECK") {
+				if m := mysqlCheckRe.FindStringSubmatch(def); len(m) > 1 {
+					column.CheckExpression = m[1]
 					table.Constraints = append(table.Constraints, sqlmapper.Constraint{
 						Type:            "CHECK",
 						Columns:         []string{column.Name},
-						CheckExpression: matches[1],
+						CheckExpression: m[1],
 					})
-					column.CheckExpression = matches[1]
 				}
 			}
+
+			table.Columns = append(table.Columns, column)
 		}
 	}
 
@@ -330,15 +521,6 @@ func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.T
 }
 
 // parseColumn processes a single column definition.
-// It handles various column attributes including data type, length/precision,
-// nullability, defaults, auto increment, and inline constraints.
-//
-// Parameters:
-//   - def: The column definition string to parse
-//
-// Returns:
-//   - sqlmapper.Column: The parsed column structure
-//   - error: An error if parsing fails
 func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 	parts := strings.Fields(def)
 	if len(parts) < 2 {
@@ -347,471 +529,376 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 
 	column := sqlmapper.Column{
 		Name:       parts[0],
-		DataType:   parts[1],
 		IsNullable: true,
 	}
 
-	// Handle AUTO_INCREMENT
-	if strings.Contains(strings.ToUpper(def), "AUTO_INCREMENT") {
-		column.AutoIncrement = true
-	}
+	defUpper := strings.ToUpper(def)
 
-	// Parse length/precision
-	if strings.Contains(column.DataType, "(") {
-		re := regexp.MustCompile(`(\w+)\((\d+)(?:,(\d+))?\)`)
-		if matches := re.FindStringSubmatch(column.DataType); len(matches) > 2 {
-			column.DataType = matches[1]
-			if len(matches[2]) > 0 {
-				fmt.Sscanf(matches[2], "%d", &column.Length)
-			}
-			if len(matches) > 3 && len(matches[3]) > 0 {
-				fmt.Sscanf(matches[3], "%d", &column.Scale)
-			}
+	// Handle ENUM and SET – they contain parenthesised string values
+	if enumMatch := mysqlEnumValuesRe.FindStringSubmatch(def); len(enumMatch) > 2 {
+		column.DataType = strings.ToLower(enumMatch[1])
+		for _, v := range mysqlEnumItemRe.FindAllStringSubmatch(enumMatch[2], -1) {
+			column.EnumValues = append(column.EnumValues, v[1])
 		}
-	}
-
-	// Parse default value
-	if idx := strings.Index(strings.ToUpper(def), "DEFAULT"); idx >= 0 {
-		defaultPart := def[idx+7:]
-		defaultPart = strings.TrimSpace(defaultPart)
-
-		// Handle function calls and keywords
-		if strings.Contains(strings.ToUpper(defaultPart), "CURRENT_TIMESTAMP") {
-			column.DefaultValue = "CURRENT_TIMESTAMP"
-		} else if strings.HasPrefix(defaultPart, "'") {
-			// Handle quoted string values
-			re := regexp.MustCompile(`'([^']*)'`)
-			if matches := re.FindStringSubmatch(defaultPart); len(matches) > 1 {
-				column.DefaultValue = matches[1]
+	} else {
+		// Regular type – parts[1] holds the type (possibly with length)
+		rawType := parts[1]
+		if typeMatch := mysqlTypeWithLenRe.FindStringSubmatch(rawType); len(typeMatch) > 2 {
+			column.DataType = strings.ToLower(typeMatch[1])
+			fmt.Sscanf(typeMatch[2], "%d", &column.Length)
+			if len(typeMatch) > 3 && typeMatch[3] != "" {
+				fmt.Sscanf(typeMatch[3], "%d", &column.Scale)
 			}
 		} else {
-			// Handle other values
-			endIdx := strings.Index(defaultPart, " ")
-			if endIdx == -1 {
-				endIdx = len(defaultPart)
-			}
-			defaultValue := strings.TrimSpace(defaultPart[:endIdx])
-			// Remove trailing comma
-			defaultValue = strings.TrimSuffix(defaultValue, ",")
-			column.DefaultValue = defaultValue
+			column.DataType = strings.ToLower(rawType)
 		}
 	}
 
-	// Parse column constraints
-	if strings.Contains(strings.ToUpper(def), "PRIMARY KEY") {
+	if strings.Contains(defUpper, "UNSIGNED") {
+		column.IsUnsigned = true
+	}
+	if strings.Contains(defUpper, "AUTO_INCREMENT") {
+		column.AutoIncrement = true
+	}
+	if strings.Contains(defUpper, "PRIMARY KEY") {
 		column.IsPrimaryKey = true
 		column.IsNullable = false
 	}
-	if strings.Contains(strings.ToUpper(def), "UNIQUE") {
+	if strings.Contains(defUpper, "UNIQUE") {
 		column.IsUnique = true
 	}
-	if strings.Contains(strings.ToUpper(def), "CHECK") {
-		re := regexp.MustCompile(`CHECK\s*\((.*?)\)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 1 {
-			column.CheckExpression = matches[1]
+	if strings.Contains(defUpper, "NOT NULL") {
+		column.IsNullable = false
+	}
+	if strings.Contains(defUpper, "CHECK") {
+		if cm := mysqlCheckRe.FindStringSubmatch(def); len(cm) > 1 {
+			column.CheckExpression = cm[1]
 		}
 	}
 
-	// Handle NOT NULL after other constraints
-	if strings.Contains(strings.ToUpper(def), "NOT NULL") {
-		column.IsNullable = false
-	} else if strings.Contains(strings.ToUpper(def), "NULL") && !strings.Contains(strings.ToUpper(def), "NOT NULL") {
-		column.IsNullable = true
-	} else {
-		// Default to NULL
-		column.IsNullable = true
+	// DEFAULT value
+	if idx := strings.Index(defUpper, "DEFAULT"); idx >= 0 {
+		defaultPart := takeUntilStopWord(strings.TrimSpace(def[idx+len("DEFAULT"):]), mysqlDefaultStopWords)
+		defaultPart = strings.TrimSuffix(strings.TrimSpace(defaultPart), ",")
+		up := strings.ToUpper(defaultPart)
+
+		switch {
+		case up == "NULL" || defaultPart == "":
+			// Implicit default, nothing to carry over.
+		case strings.Contains(up, "CURRENT_TIMESTAMP"):
+			column.DefaultValue = "CURRENT_TIMESTAMP"
+		case strings.HasPrefix(defaultPart, "'"):
+			if m := regexp.MustCompile(`'([^']*)'`).FindStringSubmatch(defaultPart); len(m) > 1 {
+				column.DefaultValue = m[1]
+			}
+		default:
+			column.DefaultValue = defaultPart
+		}
 	}
 
 	return column, nil
 }
 
-// parseConstraint processes a table constraint definition.
-// It handles various constraint types including PRIMARY KEY, FOREIGN KEY,
-// UNIQUE, and CHECK constraints.
-//
-// Parameters:
-//   - def: The constraint definition string to parse
-//
-// Returns:
-//   - sqlmapper.Constraint: The parsed constraint structure
-//   - error: An error if parsing fails
 func (m *MySQL) parseConstraint(def string) (sqlmapper.Constraint, error) {
 	constraint := sqlmapper.Constraint{}
 
-	// Extract constraint name if exists
+	// Strip CONSTRAINT name prefix
 	if strings.HasPrefix(strings.ToUpper(def), "CONSTRAINT") {
-		re := regexp.MustCompile(`CONSTRAINT\s+(\w+)\s+(.*)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 2 {
-			constraint.Name = matches[1]
-			def = matches[2]
+		if cm := mysqlConstraintRe.FindStringSubmatch(def); len(cm) > 2 {
+			constraint.Name = cm[1]
+			def = cm[2]
 		}
 	}
 
-	if strings.Contains(strings.ToUpper(def), "PRIMARY KEY") {
+	defUpper := strings.ToUpper(def)
+
+	switch {
+	case strings.Contains(defUpper, "PRIMARY KEY"):
 		constraint.Type = "PRIMARY KEY"
-		re := regexp.MustCompile(`PRIMARY\s+KEY\s*\((.*?)\)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 1 {
-			constraint.Columns = strings.Split(matches[1], ",")
-			for i := range constraint.Columns {
-				constraint.Columns[i] = strings.TrimSpace(constraint.Columns[i])
-			}
+		if m := mysqlPKRe.FindStringSubmatch(def); len(m) > 1 {
+			constraint.Columns = splitAndTrim(m[1])
 		}
-	} else if strings.Contains(strings.ToUpper(def), "FOREIGN KEY") {
+
+	case strings.Contains(defUpper, "FOREIGN KEY"):
 		constraint.Type = "FOREIGN KEY"
-		re := regexp.MustCompile(`FOREIGN\s+KEY\s*\((.*?)\)\s*REFERENCES\s+([.\w]+)\s*\((.*?)\)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 3 {
-			constraint.Columns = strings.Split(matches[1], ",")
-			constraint.RefTable = matches[2]
-			constraint.RefColumns = strings.Split(matches[3], ",")
-			for i := range constraint.Columns {
-				constraint.Columns[i] = strings.TrimSpace(constraint.Columns[i])
-			}
-			for i := range constraint.RefColumns {
-				constraint.RefColumns[i] = strings.TrimSpace(constraint.RefColumns[i])
-			}
+		if m := mysqlFKRe.FindStringSubmatch(def); len(m) > 3 {
+			constraint.Columns = splitAndTrim(m[1])
+			constraint.RefTable = stripSchemaPrefix(m[2])
+			constraint.RefColumns = splitAndTrim(m[3])
 		}
-		if strings.Contains(strings.ToUpper(def), "ON DELETE") {
-			if strings.Contains(strings.ToUpper(def), "CASCADE") {
+		if strings.Contains(defUpper, "ON DELETE") {
+			switch {
+			case strings.Contains(defUpper, "ON DELETE CASCADE"):
 				constraint.DeleteRule = "CASCADE"
-			} else if strings.Contains(strings.ToUpper(def), "SET NULL") {
+			case strings.Contains(defUpper, "ON DELETE SET NULL"):
 				constraint.DeleteRule = "SET NULL"
+			case strings.Contains(defUpper, "ON DELETE RESTRICT"):
+				constraint.DeleteRule = "RESTRICT"
+			case strings.Contains(defUpper, "ON DELETE NO ACTION"):
+				constraint.DeleteRule = "NO ACTION"
+			case strings.Contains(defUpper, "ON DELETE SET DEFAULT"):
+				constraint.DeleteRule = "SET DEFAULT"
 			}
 		}
-	} else if strings.Contains(strings.ToUpper(def), "UNIQUE") {
+		if strings.Contains(defUpper, "ON UPDATE") {
+			switch {
+			case strings.Contains(defUpper, "ON UPDATE CASCADE"):
+				constraint.UpdateRule = "CASCADE"
+			case strings.Contains(defUpper, "ON UPDATE SET NULL"):
+				constraint.UpdateRule = "SET NULL"
+			case strings.Contains(defUpper, "ON UPDATE RESTRICT"):
+				constraint.UpdateRule = "RESTRICT"
+			case strings.Contains(defUpper, "ON UPDATE NO ACTION"):
+				constraint.UpdateRule = "NO ACTION"
+			}
+		}
+
+	case strings.HasPrefix(defUpper, "UNIQUE") || strings.HasPrefix(defUpper, "UNIQUE KEY"):
 		constraint.Type = "UNIQUE"
-		re := regexp.MustCompile(`UNIQUE\s*\((.*?)\)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 1 {
-			constraint.Columns = strings.Split(matches[1], ",")
-			for i := range constraint.Columns {
-				constraint.Columns[i] = strings.TrimSpace(constraint.Columns[i])
-			}
+		if m := mysqlUniqueRe.FindStringSubmatch(def); len(m) > 1 {
+			constraint.Columns = splitAndTrim(m[1])
 		}
-	} else if strings.Contains(strings.ToUpper(def), "CHECK") {
+
+	case strings.Contains(defUpper, "CHECK"):
 		constraint.Type = "CHECK"
-		re := regexp.MustCompile(`CHECK\s*\((.*?)\)`)
-		if matches := re.FindStringSubmatch(def); len(matches) > 1 {
-			constraint.CheckExpression = matches[1]
+		if m := mysqlCheckRe.FindStringSubmatch(def); len(m) > 1 {
+			constraint.CheckExpression = m[1]
 		}
 	}
 
 	return constraint, nil
 }
 
-// parseIndexes extracts index definitions from the SQL content.
-// It handles various index types including PRIMARY KEY, UNIQUE,
-// FULLTEXT, and regular indexes.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parseIndexes(content string) error {
-	re := regexp.MustCompile(`CREATE\s+(?:UNIQUE\s+)?(?:FULLTEXT\s+)?INDEX\s+(\w+)\s+ON\s+([.\w]+)\s*\((.*?)\)`)
-	matches := re.FindAllStringSubmatch(content, -1)
-
+	matches := mysqlIndexRe.FindAllStringSubmatch(content, -1)
 	for _, match := range matches {
-		if len(match) > 3 {
-			indexName := match[1]
-			tableName := match[2]
-			columns := strings.Split(match[3], ",")
+		if len(match) < 5 {
+			continue
+		}
+		isUnique := strings.TrimSpace(match[1]) != ""
+		indexName := match[2]
+		tableName := match[3]
+		columns := splitAndTrim(match[4])
 
-			// Find the table
-			for i, table := range m.schema.Tables {
-				if table.Name == tableName || fmt.Sprintf("%s.%s", table.Schema, table.Name) == tableName {
-					index := sqlmapper.Index{
-						Name:     indexName,
-						Columns:  make([]string, len(columns)),
-						IsUnique: strings.Contains(match[0], "UNIQUE"),
-					}
-
-					// Clean column names
-					for j, col := range columns {
-						index.Columns[j] = strings.TrimSpace(col)
-					}
-
-					m.schema.Tables[i].Indexes = append(m.schema.Tables[i].Indexes, index)
-					break
-				}
+		for i, table := range m.schema.Tables {
+			if table.Name == tableName || fmt.Sprintf("%s.%s", table.Schema, table.Name) == tableName {
+				m.schema.Tables[i].Indexes = append(m.schema.Tables[i].Indexes, sqlmapper.Index{
+					Name:     indexName,
+					Columns:  columns,
+					IsUnique: isUnique,
+				})
+				break
 			}
 		}
 	}
-
 	return nil
 }
 
-// parseViews processes view definitions from the SQL content.
-// It handles both regular and updatable views with their definitions.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parseViews(content string) error {
-	viewRe := regexp.MustCompile(`CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+([.\w]+)\s+AS\s+(.*?);`)
-	viewMatches := viewRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range viewMatches {
-		if len(match) > 2 {
-			viewName := match[1]
-			view := sqlmapper.View{
-				Definition: match[2],
-			}
-
-			// Parse schema if exists
-			parts := strings.Split(viewName, ".")
-			if len(parts) > 1 {
-				view.Schema = parts[0]
-				view.Name = parts[1]
-			} else {
-				view.Name = viewName
-			}
-
-			m.schema.Views = append(m.schema.Views, view)
+	for _, match := range mysqlViewRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 3 {
+			continue
 		}
+		view := sqlmapper.View{Definition: match[2]}
+		parts := strings.Split(match[1], ".")
+		if len(parts) > 1 {
+			view.Schema = parts[0]
+			view.Name = parts[1]
+		} else {
+			view.Name = match[1]
+		}
+		m.schema.Views = append(m.schema.Views, view)
 	}
-
 	return nil
 }
 
-// parseFunctions extracts function and procedure definitions from the SQL content.
-// It handles various routine attributes including parameters, return types,
-// and procedure parameter directions (IN/OUT/INOUT).
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parseFunctions(content string) error {
-	// Parse functions
-	funcRe := regexp.MustCompile(`CREATE\s+FUNCTION\s+([.\w]+)\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+BEGIN\s+(.*?)\s+END`)
-	funcMatches := funcRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range funcMatches {
-		if len(match) > 4 {
-			functionName := match[1]
-			function := sqlmapper.Function{
-				Returns: match[3],
-				Body:    match[4],
-			}
-
-			// Parse schema if exists
-			parts := strings.Split(functionName, ".")
-			if len(parts) > 1 {
-				function.Schema = parts[0]
-				function.Name = parts[1]
-			} else {
-				function.Name = functionName
-			}
-
-			// Parse parameters
-			if match[2] != "" {
-				params := strings.Split(match[2], ",")
-				for _, param := range params {
-					parts := strings.Fields(strings.TrimSpace(param))
-					if len(parts) >= 2 {
-						parameter := sqlmapper.Parameter{
-							Name:     parts[0],
-							DataType: parts[1],
-						}
-						function.Parameters = append(function.Parameters, parameter)
-					}
+	for _, match := range mysqlFuncRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 5 {
+			continue
+		}
+		fn := sqlmapper.Function{Returns: match[3], Body: match[4]}
+		parts := strings.Split(match[1], ".")
+		if len(parts) > 1 {
+			fn.Schema = parts[0]
+			fn.Name = parts[1]
+		} else {
+			fn.Name = match[1]
+		}
+		if match[2] != "" {
+			for _, p := range strings.Split(match[2], ",") {
+				pp := strings.Fields(strings.TrimSpace(p))
+				if len(pp) >= 2 {
+					fn.Parameters = append(fn.Parameters, sqlmapper.Parameter{Name: pp[0], DataType: pp[1]})
 				}
 			}
-
-			m.schema.Functions = append(m.schema.Functions, function)
 		}
+		m.schema.Functions = append(m.schema.Functions, fn)
 	}
 
-	// Parse procedures
-	procRe := regexp.MustCompile(`CREATE\s+PROCEDURE\s+([.\w]+)\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
-	procMatches := procRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range procMatches {
-		if len(match) > 3 {
-			procName := match[1]
-			function := sqlmapper.Function{
-				Name:   procName,
-				Body:   match[3],
-				IsProc: true,
-			}
-
-			// Parse schema if exists
-			parts := strings.Split(procName, ".")
-			if len(parts) > 1 {
-				function.Schema = parts[0]
-				function.Name = parts[1]
-			}
-
-			// Parse parameters
-			if match[2] != "" {
-				params := strings.Split(match[2], ",")
-				for _, param := range params {
-					parts := strings.Fields(strings.TrimSpace(param))
-					if len(parts) >= 3 { // IN/OUT/INOUT parameter_name type
-						parameter := sqlmapper.Parameter{
-							Name:      parts[1],
-							DataType:  parts[2],
-							Direction: parts[0],
-						}
-						function.Parameters = append(function.Parameters, parameter)
-					}
+	for _, match := range mysqlProcRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 4 {
+			continue
+		}
+		fn := sqlmapper.Function{Body: match[3], IsProc: true}
+		parts := strings.Split(match[1], ".")
+		if len(parts) > 1 {
+			fn.Schema = parts[0]
+			fn.Name = parts[1]
+		} else {
+			fn.Name = match[1]
+		}
+		if match[2] != "" {
+			for _, p := range strings.Split(match[2], ",") {
+				pp := strings.Fields(strings.TrimSpace(p))
+				if len(pp) >= 3 {
+					fn.Parameters = append(fn.Parameters, sqlmapper.Parameter{
+						Name: pp[1], DataType: pp[2], Direction: pp[0],
+					})
 				}
 			}
-
-			m.schema.Functions = append(m.schema.Functions, function)
 		}
+		m.schema.Functions = append(m.schema.Functions, fn)
 	}
-
 	return nil
 }
 
-// parseTriggers processes trigger definitions from the SQL content.
-// It handles trigger timing (BEFORE/AFTER), events (INSERT/UPDATE/DELETE),
-// and trigger bodies.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parseTriggers(content string) error {
-	triggerRe := regexp.MustCompile(`CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+([.\w]+)\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
-	triggerMatches := triggerRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range triggerMatches {
-		if len(match) > 5 {
-			trigger := sqlmapper.Trigger{
-				Name:       match[1],
-				Timing:     match[2],
-				Event:      match[3],
-				Table:      match[4],
-				Body:       match[5],
-				ForEachRow: true,
-			}
-
-			// Parse schema if exists
-			parts := strings.Split(trigger.Table, ".")
-			if len(parts) > 1 {
-				trigger.Schema = parts[0]
-				trigger.Table = parts[1]
-			}
-
-			m.schema.Triggers = append(m.schema.Triggers, trigger)
+	for _, match := range mysqlTriggerRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 6 {
+			continue
 		}
+		trig := sqlmapper.Trigger{
+			Name: match[1], Timing: match[2], Event: match[3],
+			Body: match[5], ForEachRow: true,
+		}
+		parts := strings.Split(match[4], ".")
+		if len(parts) > 1 {
+			trig.Schema = parts[0]
+			trig.Table = parts[1]
+		} else {
+			trig.Table = match[4]
+		}
+		m.schema.Triggers = append(m.schema.Triggers, trig)
 	}
-
 	return nil
 }
 
-// parsePermissions extracts user privilege definitions from the SQL content.
-// It handles GRANT and REVOKE statements for various privilege types,
-// including table privileges and routine (PROCEDURE/FUNCTION) privileges.
-//
-// Parameters:
-//   - content: The SQL content to parse
-//
-// Returns:
-//   - error: An error if parsing fails
 func (m *MySQL) parsePermissions(content string) error {
-	// Parse GRANT statements for tables
-	grantRe := regexp.MustCompile(`GRANT\s+(.*?)\s+ON\s+([.\w*]+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
-	grantMatches := grantRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range grantMatches {
-		if len(match) > 4 {
-			// Split privileges and handle multiple privileges in one statement
-			privilegeStr := strings.TrimSpace(match[1])
-			var privileges []string
-			if strings.ToUpper(privilegeStr) == "ALL PRIVILEGES" {
-				privileges = []string{"ALL PRIVILEGES"}
-			} else {
-				// Handle comma-separated privileges and potential whitespace
-				for _, priv := range strings.Split(privilegeStr, ",") {
-					privs := strings.Fields(strings.TrimSpace(priv))
-					privileges = append(privileges, privs...)
-				}
-			}
-
-			perm := sqlmapper.Permission{
-				Type:       "GRANT",
-				Privileges: privileges,
-				Object:     match[2],
-				Grantee:    fmt.Sprintf("%s@%s", match[3], match[4]),
-				WithGrant:  strings.Contains(match[0], "WITH GRANT OPTION"),
-			}
-			m.schema.Permissions = append(m.schema.Permissions, perm)
+	for _, match := range mysqlGrantRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 5 {
+			continue
 		}
+		privStr := strings.TrimSpace(match[1])
+		var privs []string
+		if strings.ToUpper(privStr) == "ALL PRIVILEGES" {
+			privs = []string{"ALL PRIVILEGES"}
+		} else {
+			for _, p := range strings.Split(privStr, ",") {
+				privs = append(privs, strings.TrimSpace(p))
+			}
+		}
+		m.schema.Permissions = append(m.schema.Permissions, sqlmapper.Permission{
+			Type: "GRANT", Privileges: privs, Object: match[2],
+			Grantee:   fmt.Sprintf("%s@%s", match[3], match[4]),
+			WithGrant: strings.Contains(match[0], "WITH GRANT OPTION"),
+		})
 	}
 
-	// Parse GRANT statements for procedures and functions
-	grantProcRe := regexp.MustCompile(`GRANT\s+EXECUTE\s+ON\s+(?:PROCEDURE|FUNCTION)\s+(\w+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
-	grantProcMatches := grantProcRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range grantProcMatches {
-		if len(match) > 3 {
-			perm := sqlmapper.Permission{
-				Type:       "GRANT",
-				Privileges: []string{"EXECUTE"},
-				Object:     match[1],
-				Grantee:    fmt.Sprintf("%s@%s", match[2], match[3]),
-				WithGrant:  strings.Contains(match[0], "WITH GRANT OPTION"),
-			}
-			m.schema.Permissions = append(m.schema.Permissions, perm)
+	for _, match := range mysqlGrantProcRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 4 {
+			continue
 		}
+		m.schema.Permissions = append(m.schema.Permissions, sqlmapper.Permission{
+			Type: "GRANT", Privileges: []string{"EXECUTE"}, Object: match[1],
+			Grantee:   fmt.Sprintf("%s@%s", match[2], match[3]),
+			WithGrant: strings.Contains(match[0], "WITH GRANT OPTION"),
+		})
 	}
 
-	// Parse REVOKE statements
-	revokeRe := regexp.MustCompile(`REVOKE\s+(.*?)\s+ON\s+([.\w*]+)\s+FROM\s+'([^']+)'@'([^']+)';`)
-	revokeMatches := revokeRe.FindAllStringSubmatch(content, -1)
-
-	for _, match := range revokeMatches {
-		if len(match) > 4 {
-			// Split privileges and handle multiple privileges in one statement
-			privilegeStr := strings.TrimSpace(match[1])
-			var privileges []string
-			if strings.ToUpper(privilegeStr) == "ALL PRIVILEGES" {
-				privileges = []string{"ALL PRIVILEGES"}
-			} else {
-				// Handle comma-separated privileges and potential whitespace
-				for _, priv := range strings.Split(privilegeStr, ",") {
-					privs := strings.Fields(strings.TrimSpace(priv))
-					privileges = append(privileges, privs...)
-				}
-			}
-
-			perm := sqlmapper.Permission{
-				Type:       "REVOKE",
-				Privileges: privileges,
-				Object:     match[2],
-				Grantee:    fmt.Sprintf("%s@%s", match[3], match[4]),
-			}
-			m.schema.Permissions = append(m.schema.Permissions, perm)
+	for _, match := range mysqlRevokeRe.FindAllStringSubmatch(content, -1) {
+		if len(match) < 5 {
+			continue
 		}
+		privStr := strings.TrimSpace(match[1])
+		var privs []string
+		if strings.ToUpper(privStr) == "ALL PRIVILEGES" {
+			privs = []string{"ALL PRIVILEGES"}
+		} else {
+			for _, p := range strings.Split(privStr, ",") {
+				privs = append(privs, strings.TrimSpace(p))
+			}
+		}
+		m.schema.Permissions = append(m.schema.Permissions, sqlmapper.Permission{
+			Type: "REVOKE", Privileges: privs, Object: match[2],
+			Grantee: fmt.Sprintf("%s@%s", match[3], match[4]),
+		})
 	}
-
 	return nil
 }
 
-// generateTableSQL creates a CREATE TABLE statement for the given table.
-// It includes column definitions, constraints, indexes, and table options.
-//
-// Parameters:
-//   - table: The table structure to generate SQL for
-//
-// Returns:
-//   - string: The generated CREATE TABLE statement
-func (m *MySQL) generateTableSQL(table sqlmapper.Table) string {
+// generateTableSQL creates a CREATE TABLE statement, applying type mapping and
+// outputting all constraints (PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK).
+func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Constraint) string {
 	var result strings.Builder
 
 	result.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", table.Name))
 
-	// Columns
-	for i, column := range table.Columns {
-		result.WriteString("    " + m.generateColumnSQL(column))
-		if i < len(table.Columns)-1 {
+	// A single-column PK on an auto-increment column reads better inline; every
+	// other PK is emitted as a table-level constraint. Exactly one of the two must
+	// fire, otherwise MySQL rejects the table with "Multiple primary key defined".
+	inlinePKCols := map[string]bool{}
+	var tableConstraints []sqlmapper.Constraint
+	for _, c := range table.Constraints {
+		switch c.Type {
+		case "PRIMARY KEY":
+			if len(c.Columns) == 1 && columnIsAutoIncrement(table, c.Columns[0]) {
+				inlinePKCols[c.Columns[0]] = true
+				continue
+			}
+			tableConstraints = append(tableConstraints, c)
+		case "FOREIGN KEY":
+			if isDeferred(deferred, c) {
+				continue
+			}
+			tableConstraints = append(tableConstraints, c)
+		case "UNIQUE", "CHECK":
+			tableConstraints = append(tableConstraints, c)
+		}
+	}
+
+	// Columns flagged as PK without a matching constraint (inline "id int PRIMARY
+	// KEY" in the source) still need the marker.
+	if len(inlinePKCols) == 0 {
+		hasPKConstraint := false
+		for _, c := range table.Constraints {
+			if c.Type == "PRIMARY KEY" {
+				hasPKConstraint = true
+				break
+			}
+		}
+		if !hasPKConstraint {
+			for _, col := range table.Columns {
+				if col.IsPrimaryKey {
+					inlinePKCols[col.Name] = true
+				}
+			}
+		}
+	}
+
+	totalItems := len(table.Columns) + len(tableConstraints)
+
+	for i, col := range table.Columns {
+		result.WriteString("    " + m.generateColumnSQL(col, inlinePKCols[col.Name]))
+		if i < totalItems-1 {
+			result.WriteString(",")
+		}
+		result.WriteString("\n")
+	}
+
+	for i, c := range tableConstraints {
+		result.WriteString("    " + m.generateConstraintSQL(c))
+		if len(table.Columns)+i < totalItems-1 {
 			result.WriteString(",")
 		}
 		result.WriteString("\n")
@@ -821,78 +908,193 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table) string {
 	return result.String()
 }
 
-// generateColumnSQL creates the SQL definition for a single column.
-// It handles various column attributes including data type, length/precision,
-// nullability, defaults, auto increment, and constraints.
-//
-// Parameters:
-//   - column: The column structure to generate SQL for
-//
-// Returns:
-//   - string: The generated column definition
-func (m *MySQL) generateColumnSQL(column sqlmapper.Column) string {
+// generateColumnSQL creates the SQL for a single column, applying type mapping.
+// inlinePK reports whether this column should carry the PRIMARY KEY marker itself;
+// when the table emits an explicit PK constraint it must not, or MySQL sees two.
+func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK bool) string {
 	var parts []string
 	parts = append(parts, column.Name)
 
-	// Data type with length/precision
-	if column.Length > 0 {
-		if column.Scale > 0 {
-			parts = append(parts, fmt.Sprintf("%s(%d,%d)", column.DataType, column.Length, column.Scale))
-		} else {
-			parts = append(parts, fmt.Sprintf("%s(%d)", column.DataType, column.Length))
-		}
-	} else {
-		parts = append(parts, column.DataType)
-	}
+	mysqlType := m.resolveType(column)
+	parts = append(parts, mysqlType)
 
-	// Handle AUTO_INCREMENT and PRIMARY KEY
 	if column.AutoIncrement {
 		parts = append(parts, "AUTO_INCREMENT")
 	}
-	if column.IsPrimaryKey {
+	if inlinePK {
 		parts = append(parts, "PRIMARY KEY")
-	} else if !column.IsNullable && column.DefaultValue == "" {
+	} else if !column.IsNullable {
 		parts = append(parts, "NOT NULL")
 	}
 
-	if column.DefaultValue != "" {
-		if strings.Contains(column.DefaultValue, " ") ||
-			strings.ToUpper(column.DefaultValue) == "CURRENT_TIMESTAMP" {
-			parts = append(parts, "DEFAULT", column.DefaultValue)
-		} else {
-			parts = append(parts, "DEFAULT", fmt.Sprintf("'%s'", column.DefaultValue))
-		}
+	if dv := m.defaultLiteral(column, mysqlType); dv != "" {
+		parts = append(parts, "DEFAULT", dv)
 	}
 
-	if column.IsUnique && !column.IsPrimaryKey {
+	if column.IsUnique && !inlinePK {
 		parts = append(parts, "UNIQUE")
 	}
 
 	return strings.Join(parts, " ")
 }
 
-// generateIndexSQL creates a CREATE INDEX statement for the given index.
-// It handles various index types including UNIQUE and regular indexes.
-//
-// Parameters:
-//   - tableName: The name of the table the index belongs to
-//   - index: The index structure to generate SQL for
-//
-// Returns:
-//   - string: The generated CREATE INDEX statement
-func (m *MySQL) generateIndexSQL(tableName string, index sqlmapper.Index) string {
-	var result strings.Builder
-
-	if index.IsUnique {
-		result.WriteString("CREATE UNIQUE INDEX ")
-	} else {
-		result.WriteString("CREATE INDEX ")
+// defaultLiteral renders a column default as MySQL expects it, returning an empty
+// string when there is nothing to emit. Booleans arriving from PostgreSQL are the
+// notable case: MySQL stores them as TINYINT(1) and rejects DEFAULT 'true'.
+func (m *MySQL) defaultLiteral(column sqlmapper.Column, mysqlType string) string {
+	dv := strings.TrimSpace(column.DefaultValue)
+	if dv == "" || strings.EqualFold(dv, "NULL") {
+		return ""
 	}
 
-	result.WriteString(fmt.Sprintf("%s ON %s(%s);",
-		index.Name,
-		tableName,
-		strings.Join(index.Columns, ", ")))
+	if strings.HasPrefix(strings.ToUpper(mysqlType), "TINYINT(1)") {
+		switch strings.ToLower(dv) {
+		case "true", "t", "1":
+			return "1"
+		case "false", "f", "0":
+			return "0"
+		}
+	}
 
-	return result.String()
+	// TEXT/BLOB/JSON columns cannot carry a literal default in MySQL.
+	upperType := strings.ToUpper(mysqlType)
+	for _, t := range []string{"TEXT", "BLOB", "JSON", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB"} {
+		if upperType == t {
+			return ""
+		}
+	}
+
+	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
+		return "CURRENT_TIMESTAMP"
+	}
+	if isNumeric(dv) {
+		return dv
+	}
+	if strings.ContainsAny(dv, "()") {
+		return toMySQLExpression(dv)
+	}
+	return fmt.Sprintf("'%s'", strings.ReplaceAll(dv, "'", "''"))
+}
+
+// resolveType maps a column's DataType to the MySQL equivalent.
+func (m *MySQL) resolveType(col sqlmapper.Column) string {
+	lower := strings.ToLower(col.DataType)
+
+	// MySQL has no array type; JSON is the closest lossless container.
+	if col.IsArray {
+		return "JSON"
+	}
+
+	// ENUM/SET get special treatment to preserve values
+	if lower == "enum" || lower == "set" {
+		if len(col.EnumValues) > 0 {
+			quoted := make([]string, len(col.EnumValues))
+			for i, v := range col.EnumValues {
+				quoted[i] = fmt.Sprintf("'%s'", v)
+			}
+			return fmt.Sprintf("%s(%s)", strings.ToUpper(lower), strings.Join(quoted, ","))
+		}
+		if lower == "enum" {
+			return "VARCHAR(255)"
+		}
+		return "TEXT"
+	}
+
+	// For serial types from PostgreSQL, output the base int type (AUTO_INCREMENT handles the rest)
+	if lower == "serial" {
+		return "INT"
+	}
+	if lower == "bigserial" {
+		return "BIGINT"
+	}
+	if lower == "smallserial" {
+		return "SMALLINT"
+	}
+
+	// UUID / network types from PG that embed length in type name (e.g. varchar(36))
+	if strings.Contains(lower, "(") {
+		return strings.ToUpper(lower)
+	}
+
+	if mapped, ok := toMySQLType[lower]; ok {
+		t := strings.ToUpper(mapped)
+		if col.Length > 0 && !strings.Contains(t, "(") &&
+			t != "TEXT" && t != "BLOB" && t != "JSON" &&
+			t != "TINYTEXT" && t != "MEDIUMTEXT" && t != "LONGTEXT" &&
+			t != "TINYBLOB" && t != "MEDIUMBLOB" && t != "LONGBLOB" {
+			if col.Scale > 0 {
+				t = fmt.Sprintf("%s(%d,%d)", t, col.Length, col.Scale)
+			} else {
+				t = fmt.Sprintf("%s(%d)", t, col.Length)
+			}
+		}
+		return t
+	}
+
+	// Fallback – return as-is with length if present
+	if col.Length > 0 {
+		if col.Scale > 0 {
+			return fmt.Sprintf("%s(%d,%d)", strings.ToUpper(col.DataType), col.Length, col.Scale)
+		}
+		return fmt.Sprintf("%s(%d)", strings.ToUpper(col.DataType), col.Length)
+	}
+	return strings.ToUpper(col.DataType)
+}
+
+func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint) string {
+	var sb strings.Builder
+	if c.Name != "" {
+		sb.WriteString(fmt.Sprintf("CONSTRAINT %s ", c.Name))
+	}
+	switch c.Type {
+	case "PRIMARY KEY":
+		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+	case "FOREIGN KEY":
+		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
+		if c.DeleteRule != "" {
+			sb.WriteString(" ON DELETE " + c.DeleteRule)
+		}
+		if c.UpdateRule != "" {
+			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+		}
+	case "UNIQUE":
+		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+	case "CHECK":
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", toMySQLExpression(c.CheckExpression)))
+	}
+	return sb.String()
+}
+
+func (m *MySQL) generateIndexSQL(tableName string, index sqlmapper.Index) string {
+	var sb strings.Builder
+	if index.IsUnique {
+		sb.WriteString("CREATE UNIQUE INDEX ")
+	} else {
+		sb.WriteString("CREATE INDEX ")
+	}
+	sb.WriteString(fmt.Sprintf("%s ON %s(%s);", index.Name, tableName, strings.Join(index.Columns, ", ")))
+	return sb.String()
+}
+
+// splitAndTrim splits a comma-separated string and trims whitespace from each element.
+func splitAndTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// isNumeric reports whether s looks like a bare number (not needing quotes).
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' && c != '-' {
+			return false
+		}
+	}
+	return true
 }

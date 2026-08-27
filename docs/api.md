@@ -85,31 +85,37 @@ type Table struct {
 
 ```go
 type Column struct {
-    Name          string
-    DataType      string
-    Length        int
-    Scale         int
-    IsNullable    bool
-    DefaultValue  string
-    AutoIncrement bool
-    IsPrimaryKey  bool
-    IsUnique      bool
-    Comment       string
+    Name            string
+    DataType        string
+    Length          int
+    Scale           int
+    Precision       int
+    IsNullable      bool
+    DefaultValue    string
+    AutoIncrement   bool
+    IsPrimaryKey    bool
+    IsUnique        bool
+    IsUnsigned      bool
+    Comment         string
+    Order           int
+    CheckExpression string
+    EnumValues      []string // for ENUM/SET types
+    IsArray         bool     // PostgreSQL array type (e.g. text[])
 }
 ```
 
 ## Error Handling
 
-SQLMapper provides specific error types for different scenarios:
+`Parse` and `Generate` return a plain `error`; there are no exported sentinel values to compare against yet, so match on the message or simply propagate:
 
 ```go
-var (
-    ErrEmptyContent     = errors.New("empty content")
-    ErrInvalidSQL       = errors.New("invalid SQL syntax")
-    ErrUnsupportedType  = errors.New("unsupported data type")
-    ErrParserNotFound   = errors.New("parser not found for database type")
-)
+schema, err := parser.Parse(content)
+if err != nil {
+    return fmt.Errorf("parsing %s dump: %w", "mysql", err)
+}
 ```
+
+Both methods reject empty input with `"empty content"` / `"empty schema"`. Parse errors carry the parsing stage that failed, for example `"error parsing tables: ..."`.
 
 ## Examples
 
@@ -222,4 +228,3 @@ func main() {
 - Complex stored procedures might need manual adjustment
 - Custom data types may require special handling
 - Performance may vary with large schemas
-</rewritten_file>

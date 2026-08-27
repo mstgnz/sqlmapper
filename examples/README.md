@@ -1,54 +1,30 @@
-# SDC Examples
+# SQLMapper Examples
 
-This directory contains various examples demonstrating the usage of the SDC library.
+A single runnable program that exercises the library end to end.
 
-## Table of Contents
+```bash
+go run ./examples
+```
 
-1. [Basic Conversion](#basic-conversion)
-2. [Migration Examples](#migration-examples)
-3. [Schema Comparison](#schema-comparison)
-4. [Advanced Usage](#advanced-usage)
+It does two things:
 
-## Basic Conversion
+1. **Stream parsing.** Reads `files/mysql.sql` through the MySQL stream parser and prints each schema object as it is discovered, without loading the whole dump into memory.
+2. **Conversion.** Converts each sample dump to another dialect and writes the result under `files/output/`.
 
-### MySQL to PostgreSQL
-See [mysql_to_postgres.go](mysql_to_postgres.go)
+## Files
 
-### MySQL to SQLite
-See [mysql_to_sqlite.go](mysql_to_sqlite.go)
+| Path | Contents |
+| --- | --- |
+| `main.go` | The program described above |
+| `files/mysql.sql` | Sample MySQL dump |
+| `files/postgres.sql` | Sample PostgreSQL dump |
+| `files/sqlite.sql` | Sample SQLite schema |
+| `files/oracle.sql` | Sample Oracle schema |
+| `files/sqlserver.sql` | Sample SQL Server schema |
+| `files/output/` | Generated SQL, rewritten on every run |
 
-### PostgreSQL to MySQL
-See [postgres_to_mysql.go](postgres_to_mysql.go)
+The conversions it runs are PostgreSQL to MySQL, MySQL to PostgreSQL, Oracle to MySQL, SQL Server to PostgreSQL, and SQLite to Oracle.
 
-## Migration Examples
+## Using the library directly
 
-### Basic Migration
-See [basic_migration.go](migration/basic_migration.go)
-
-### Custom Migration
-See [custom_migration.go](migration/custom_migration.go)
-
-### Migration with Rollback
-See [migration_rollback.go](migration/migration_rollback.go)
-
-## Schema Comparison
-
-### Basic Comparison
-See [basic_comparison.go](schema/basic_comparison.go)
-
-### Advanced Comparison
-See [advanced_comparison.go](schema/advanced_comparison.go)
-
-## Advanced Usage
-
-### Custom Type Conversion
-See [custom_type_conversion.go](advanced/custom_type_conversion.go)
-
-### Connection Pool Management
-See [connection_pool.go](advanced/connection_pool.go)
-
-### Error Handling
-See [error_handling.go](advanced/error_handling.go)
-
-### Logging Configuration
-See [logging.go](advanced/logging.go) 
+The shortest useful program is in the [top-level README](../README.md#library). Both parse and generate are single method calls, so an example directory of one-liners would not add much beyond it.

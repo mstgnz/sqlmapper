@@ -1,111 +1,73 @@
 /*
-Package sqlmapper provides SQL dump conversion functionality between different database systems.
+Package sqlmapper converts SQL schema definitions between database dialects.
 
-SQLPORTER (Parser, Mapper, Converter, Migrator, etc.) is a powerful Go library that allows you to convert SQL dump files
-between different database systems. This library is particularly useful when you need to
-migrate a database schema from one system to another.
+The library reads a SQL dump, parses the DDL into a dialect-neutral [Schema],
+and renders that schema back out as SQL for a different database. It works on
+files: nothing here connects to a database.
 
-Basic Usage:
+# Supported dialects
 
-	import "github.com/mstgnz/sqlmapper"
+MySQL, PostgreSQL, SQLite, Oracle and SQL Server. Each dialect lives in its own
+package and implements [Database]:
 
-	// Create a MySQL parser
-	parser := sqlmapper.NewMySQLParser()
+	import (
+		"github.com/mstgnz/sqlmapper/mysql"
+		"github.com/mstgnz/sqlmapper/postgres"
+	)
 
-	// Parse MySQL dump
-	entity, err := Parse(mysqlDump)
+	schema, err := mysql.NewMySQL().Parse(mysqlDump)
 	if err != nil {
-		// handle error
+		return err
 	}
 
-	// Convert to PostgreSQL
-	pgParser := sqlmapper.NewPostgresParser()
-	pgSQL, err := pgParser.Convert(entity)
-
-Migration Support:
-
-The package provides migration support through the migration package:
-
-	import "github.com/mstgnz/sqlmapper/migration"
-
-	// Create migration manager
-	manager := migration.NewMigrationManager(driver)
-
-	// Apply migrations
-	err := manager.Apply(context.Background())
-
-Schema Comparison:
-
-Compare database schemas using the schema package:
-
-	import "github.com/mstgnz/sqlmapper/schema"
-
-	// Create schema comparer
-	comparer := schema.NewSchemaComparer(sourceTables, targetTables)
-
-	// Find differences
-	differences := comparer.Compare()
-
-Database Support:
-
-The package supports the following databases:
-  - MySQL
-  - PostgreSQL
-  - SQLite
-  - Oracle
-  - SQL Server
-
-Each database has its own parser implementation that handles the specific syntax
-and data types of that database system.
-
-Error Handling:
-
-All operations that can fail return an error as the last return value.
-Errors should be checked and handled appropriately:
-
+	pgSQL, err := postgres.NewPostgreSQL().Generate(schema)
 	if err != nil {
-		switch {
-		case errors.IsConnectionError(err):
-			// handle connection error
-		case errors.IsQueryError(err):
-			// handle query error
-		default:
-			// handle other errors
-		}
+		return err
 	}
 
-Logging:
+MySQL and PostgreSQL are the best covered pair and the one the test suite
+exercises against real database servers. The other three dialects are usable but
+less complete.
 
-The package provides a structured logging system:
+# What is converted
 
-	import "github.com/mstgnz/sqlmapper/logger"
+Tables, columns and their types, primary keys, foreign keys, unique and check
+constraints, indexes, and views. Type mapping is dialect-aware: a PostgreSQL
+"character varying(255)" becomes a MySQL VARCHAR(255), a MySQL ENUM becomes a
+PostgreSQL enum type, an array column becomes JSON on the way to MySQL, and a
+column driven by a sequence becomes AUTO_INCREMENT or SERIAL as appropriate.
 
-	log := logger.NewLogger(logger.Config{
-		Level:  logger.INFO,
-		Prefix: "[SQLPORTER] ",
+# What is not converted
+
+Function, procedure and trigger bodies are parsed into the schema but are not
+translated, because their contents are procedural code rather than DDL. View
+bodies are carried over verbatim: the SELECT is emitted unchanged, so a view
+written against dialect-specific functions may need editing by hand. Table data
+(INSERT statements) is not carried across.
+
+The parsers are regular-expression based. They handle the output of mysqldump
+and pg_dump, but they are not full SQL grammars: deeply nested procedural bodies
+and exotic syntax can be missed. Review the generated SQL before running it
+against anything you care about.
+
+# Streaming
+
+For dumps too large to hold in memory, each dialect ships a stream parser that
+reports schema objects through a callback as they are read:
+
+	import "github.com/mstgnz/sqlmapper/stream"
+
+	parser := mysql.NewMySQLStreamParser()
+	err := parser.ParseStream(file, func(obj stream.SchemaObject) error {
+		// obj.Type is TableObject, ViewObject, ...
+		return nil
 	})
 
-	log.Info("Starting conversion", map[string]interface{}{
-		"source": "mysql",
-		"target": "postgres",
-	})
+# Concurrency
 
-Configuration:
-
-Most components can be configured through their respective Config structs:
-
-	config := db.Config{
-		Driver:   "postgres",
-		Host:     "localhost",
-		Port:     5432,
-		Database: "mydb",
-		Username: "user",
-		Password: "pass",
-	}
-
-Thread Safety:
-
-All public APIs in this package are thread-safe and can be used concurrently.
+A parser instance holds the schema it is building, so a single instance must not
+be shared across goroutines. Create one parser per goroutine. The stream
+parsers' ParseStreamParallel does this internally and is safe to call.
 
 For more information and examples, visit: https://github.com/mstgnz/sqlmapper
 */
