@@ -1,6 +1,7 @@
 # SQL Server Database Conversion Guide
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [Data Type Mappings](#data-type-mappings)
 3. [Syntax Differences](#syntax-differences)
@@ -8,41 +9,46 @@
 5. [Examples](#examples)
 
 ## Introduction
+
 This guide provides detailed information about converting SQL Server database schemas to and from other database systems using SQLMapper.
 
 ## Data Type Mappings
 
 ### SQL Server to MySQL
-| SQL Server Type | MySQL Type | Notes |
-|----------------|------------|-------|
-| BIGINT | BIGINT | - |
-| INT | INT | - |
-| SMALLINT | SMALLINT | - |
-| TINYINT | TINYINT | Range differences |
-| DECIMAL(p,s) | DECIMAL(p,s) | - |
-| VARCHAR(n) | VARCHAR(n) | - |
-| NVARCHAR(n) | VARCHAR(n) | UTF-8 encoding |
-| TEXT | LONGTEXT | - |
-| DATETIME2 | DATETIME | Precision differences |
-| UNIQUEIDENTIFIER | CHAR(36) | - |
+
+| SQL Server Type  | MySQL Type   | Notes                 |
+| ---------------- | ------------ | --------------------- |
+| BIGINT           | BIGINT       | -                     |
+| INT              | INT          | -                     |
+| SMALLINT         | SMALLINT     | -                     |
+| TINYINT          | TINYINT      | Range differences     |
+| DECIMAL(p,s)     | DECIMAL(p,s) | -                     |
+| VARCHAR(n)       | VARCHAR(n)   | -                     |
+| NVARCHAR(n)      | VARCHAR(n)   | UTF-8 encoding        |
+| TEXT             | LONGTEXT     | -                     |
+| DATETIME2        | DATETIME     | Precision differences |
+| UNIQUEIDENTIFIER | CHAR(36)     | -                     |
 
 ### SQL Server to PostgreSQL
-| SQL Server Type | PostgreSQL Type | Notes |
-|----------------|-----------------|-------|
-| BIGINT | BIGINT | - |
-| INT | INTEGER | - |
-| SMALLINT | SMALLINT | - |
-| DECIMAL(p,s) | NUMERIC(p,s) | - |
-| VARCHAR(n) | VARCHAR(n) | - |
-| NVARCHAR(n) | VARCHAR(n) | - |
-| TEXT | TEXT | - |
-| DATETIME2 | TIMESTAMP | - |
-| UNIQUEIDENTIFIER | UUID | - |
+
+| SQL Server Type  | PostgreSQL Type | Notes |
+| ---------------- | --------------- | ----- |
+| BIGINT           | BIGINT          | -     |
+| INT              | INTEGER         | -     |
+| SMALLINT         | SMALLINT        | -     |
+| DECIMAL(p,s)     | NUMERIC(p,s)    | -     |
+| VARCHAR(n)       | VARCHAR(n)      | -     |
+| NVARCHAR(n)      | VARCHAR(n)      | -     |
+| TEXT             | TEXT            | -     |
+| DATETIME2        | TIMESTAMP       | -     |
+| UNIQUEIDENTIFIER | UUID            | -     |
 
 ## Syntax Differences
 
 ### Identity Columns
+
 SQL Server:
+
 ```sql
 CREATE TABLE users (
     id INT IDENTITY(1,1) PRIMARY KEY,
@@ -51,6 +57,7 @@ CREATE TABLE users (
 ```
 
 MySQL equivalent:
+
 ```sql
 CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -59,6 +66,7 @@ CREATE TABLE users (
 ```
 
 PostgreSQL equivalent:
+
 ```sql
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
@@ -67,20 +75,23 @@ CREATE TABLE users (
 ```
 
 ### Stored Procedures
+
 SQL Server:
+
 ```sql
 CREATE PROCEDURE UpdateEmployee
     @EmpID INT,
     @Salary DECIMAL(10,2)
 AS
 BEGIN
-    UPDATE Employees 
-    SET Salary = @Salary 
+    UPDATE Employees
+    SET Salary = @Salary
     WHERE EmployeeID = @EmpID;
 END;
 ```
 
 MySQL equivalent:
+
 ```sql
 DELIMITER //
 CREATE PROCEDURE UpdateEmployee(
@@ -88,8 +99,8 @@ CREATE PROCEDURE UpdateEmployee(
     IN p_Salary DECIMAL(10,2)
 )
 BEGIN
-    UPDATE Employees 
-    SET Salary = p_Salary 
+    UPDATE Employees
+    SET Salary = p_Salary
     WHERE EmployeeID = p_EmpID;
 END //
 DELIMITER ;
@@ -98,7 +109,9 @@ DELIMITER ;
 ## Common Issues
 
 ### 1. Collation Differences
+
 SQL Server uses different collation naming conventions:
+
 ```sql
 -- SQL Server
 COLLATE SQL_Latin1_General_CP1_CI_AS
@@ -111,6 +124,7 @@ COLLATE "en_US.utf8"
 ```
 
 ### 2. DateTime Handling
+
 ```sql
 -- SQL Server
 GETDATE()
@@ -126,6 +140,7 @@ CURRENT_TIMESTAMP + INTERVAL '1 day'
 ```
 
 ### 3. String Concatenation
+
 ```sql
 -- SQL Server
 SELECT FirstName + ' ' + LastName
@@ -140,6 +155,7 @@ SELECT FirstName || ' ' || LastName
 ## Examples
 
 ### Converting Table with Computed Columns
+
 ```sql
 -- Original SQL Server Table
 CREATE TABLE orders (
@@ -170,6 +186,7 @@ CREATE TABLE orders (
 ```
 
 ### Converting Table with Custom Types
+
 ```sql
 -- SQL Server Table with Custom Types
 CREATE TABLE customer_data (
@@ -197,4 +214,4 @@ CREATE TABLE customer_data (
     metadata JSONB,
     PRIMARY KEY (id)
 );
-``` 
+```

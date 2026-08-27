@@ -1,6 +1,7 @@
 # Oracle Database Conversion Guide
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [Data Type Mappings](#data-type-mappings)
 3. [Syntax Differences](#syntax-differences)
@@ -8,35 +9,40 @@
 5. [Examples](#examples)
 
 ## Introduction
+
 This guide provides detailed information about converting Oracle database schemas to and from other database systems using SQLMapper.
 
 ## Data Type Mappings
 
 ### Oracle to MySQL
-| Oracle Type | MySQL Type | Notes |
-|------------|------------|-------|
-| NUMBER(p,s) | DECIMAL(p,s) | For exact numeric values |
-| NUMBER | BIGINT | When no precision specified |
-| VARCHAR2 | VARCHAR | - |
-| CLOB | LONGTEXT | - |
-| BLOB | LONGBLOB | - |
-| DATE | DATETIME | - |
-| TIMESTAMP | TIMESTAMP | - |
+
+| Oracle Type | MySQL Type   | Notes                       |
+| ----------- | ------------ | --------------------------- |
+| NUMBER(p,s) | DECIMAL(p,s) | For exact numeric values    |
+| NUMBER      | BIGINT       | When no precision specified |
+| VARCHAR2    | VARCHAR      | -                           |
+| CLOB        | LONGTEXT     | -                           |
+| BLOB        | LONGBLOB     | -                           |
+| DATE        | DATETIME     | -                           |
+| TIMESTAMP   | TIMESTAMP    | -                           |
 
 ### Oracle to PostgreSQL
+
 | Oracle Type | PostgreSQL Type | Notes |
-|------------|-----------------|-------|
-| NUMBER(p,s) | NUMERIC(p,s) | - |
-| VARCHAR2 | VARCHAR | - |
-| CLOB | TEXT | - |
-| BLOB | BYTEA | - |
-| DATE | TIMESTAMP | - |
-| TIMESTAMP | TIMESTAMP | - |
+| ----------- | --------------- | ----- |
+| NUMBER(p,s) | NUMERIC(p,s)    | -     |
+| VARCHAR2    | VARCHAR         | -     |
+| CLOB        | TEXT            | -     |
+| BLOB        | BYTEA           | -     |
+| DATE        | TIMESTAMP       | -     |
+| TIMESTAMP   | TIMESTAMP       | -     |
 
 ## Syntax Differences
 
 ### Sequences
+
 Oracle:
+
 ```sql
 CREATE SEQUENCE my_sequence
     START WITH 1
@@ -46,6 +52,7 @@ CREATE SEQUENCE my_sequence
 ```
 
 MySQL equivalent:
+
 ```sql
 CREATE TABLE my_sequence (
     id BIGINT NOT NULL AUTO_INCREMENT,
@@ -54,6 +61,7 @@ CREATE TABLE my_sequence (
 ```
 
 PostgreSQL equivalent:
+
 ```sql
 CREATE SEQUENCE my_sequence
     START 1
@@ -62,7 +70,9 @@ CREATE SEQUENCE my_sequence
 ```
 
 ### Stored Procedures
+
 Oracle:
+
 ```sql
 CREATE OR REPLACE PROCEDURE update_employee(
     p_emp_id IN NUMBER,
@@ -70,14 +80,15 @@ CREATE OR REPLACE PROCEDURE update_employee(
 )
 IS
 BEGIN
-    UPDATE employees 
-    SET salary = p_salary 
+    UPDATE employees
+    SET salary = p_salary
     WHERE employee_id = p_emp_id;
 END;
 /
 ```
 
 MySQL equivalent:
+
 ```sql
 DELIMITER //
 CREATE PROCEDURE update_employee(
@@ -85,8 +96,8 @@ CREATE PROCEDURE update_employee(
     IN p_salary DECIMAL(10,2)
 )
 BEGIN
-    UPDATE employees 
-    SET salary = p_salary 
+    UPDATE employees
+    SET salary = p_salary
     WHERE employee_id = p_emp_id;
 END //
 DELIMITER ;
@@ -95,7 +106,9 @@ DELIMITER ;
 ## Common Issues
 
 ### 1. Date Format Differences
+
 Oracle's default date format differs from other databases. Use explicit format strings:
+
 ```sql
 -- Oracle
 TO_DATE('2023-12-27', 'YYYY-MM-DD')
@@ -108,17 +121,21 @@ TO_DATE('2023-12-27', 'YYYY-MM-DD')
 ```
 
 ### 2. Sequence Usage
+
 When converting sequences, be aware that:
+
 - MySQL doesn't support sequences natively
 - PostgreSQL sequences require explicit nextval() calls
 - Oracle sequences can be used in DEFAULT values
 
 ### 3. NULL Handling
+
 Oracle treats empty strings as NULL, while other databases distinguish between empty strings and NULL values.
 
 ## Examples
 
 ### Converting Table with Identity Column
+
 ```sql
 -- Original Oracle Table
 CREATE TABLE employees (
@@ -149,6 +166,7 @@ CREATE TABLE employees (
 ```
 
 ### Converting Complex Types
+
 ```sql
 -- Oracle Table with Complex Types
 CREATE TABLE documents (
@@ -176,4 +194,4 @@ CREATE TABLE documents (
     binary_data BYTEA,
     PRIMARY KEY (doc_id)
 );
-``` 
+```

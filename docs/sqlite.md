@@ -1,12 +1,15 @@
 # SQLite Features and Usage
 
 ## Overview
+
 SQLMapper provides comprehensive support for converting SQLite database schemas to other database systems. This document outlines SQLite-specific features and usage examples.
 
 ## Supported Features
 
 ### Data Types
+
 SQLite's dynamic type system supports five basic data types:
+
 - `NULL`: Null value
 - `INTEGER`: Integer values
 - `REAL`: Floating point numbers
@@ -16,6 +19,7 @@ SQLite's dynamic type system supports five basic data types:
 Note: Due to SQLite's "type flexibility" feature, data types from other database systems are converted to these five basic types.
 
 ### Table Features
+
 - Auto-incrementing fields (`AUTOINCREMENT`)
 - Table constraints
 - Temporary tables (`TEMPORARY TABLE`)
@@ -23,12 +27,14 @@ Note: Due to SQLite's "type flexibility" feature, data types from other database
 - Virtual tables (with FTS and R-Tree modules)
 
 ### Indexes
+
 - Unique indexes
 - Composite indexes
 - Partial indexes
 - Descending indexes
 
 ### Constraints
+
 - `NOT NULL`
 - `UNIQUE`
 - `PRIMARY KEY`
@@ -39,6 +45,7 @@ Note: Due to SQLite's "type flexibility" feature, data types from other database
 ## Usage Examples
 
 ### Simple Table Creation
+
 ```sql
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +57,7 @@ CREATE TABLE users (
 ```
 
 ### Related Tables
+
 ```sql
 -- Enable foreign key support
 PRAGMA foreign_keys = ON;
@@ -72,6 +80,7 @@ CREATE TABLE products (
 ```
 
 ### Index Usage
+
 ```sql
 -- Unique index
 CREATE UNIQUE INDEX idx_user_email ON users(email);
@@ -87,6 +96,7 @@ CREATE INDEX idx_product_price ON products(price DESC);
 ```
 
 ### View Creation
+
 ```sql
 CREATE VIEW active_products AS
 SELECT p.*, c.name as category_name
@@ -96,17 +106,19 @@ WHERE p.stock > 0;
 ```
 
 ### Trigger Creation
+
 ```sql
 CREATE TRIGGER tr_update_stock
 AFTER INSERT ON order_details
 BEGIN
-    UPDATE products 
-    SET stock = stock - NEW.quantity 
+    UPDATE products
+    SET stock = stock - NEW.quantity
     WHERE id = NEW.product_id;
 END;
 ```
 
 ### Virtual Table (FTS) Usage
+
 ```sql
 -- Create FTS5 table
 CREATE VIRTUAL TABLE articles USING fts5(
@@ -116,25 +128,28 @@ CREATE VIRTUAL TABLE articles USING fts5(
 );
 
 -- Search example
-SELECT * FROM articles 
+SELECT * FROM articles
 WHERE articles MATCH 'python AND programming';
 ```
 
 ## Conversion Notes
 
 ### To MySQL
+
 - `INTEGER PRIMARY KEY AUTOINCREMENT` -> `INT AUTO_INCREMENT PRIMARY KEY`
 - `TEXT` -> Appropriate length `VARCHAR` or `TEXT`
 - `REAL` -> `DOUBLE`
 - SQLite triggers -> More comprehensive MySQL triggers
 
 ### To PostgreSQL
+
 - `INTEGER PRIMARY KEY AUTOINCREMENT` -> `SERIAL PRIMARY KEY`
 - `TEXT` -> `TEXT` or `VARCHAR`
 - `REAL` -> `DOUBLE PRECISION`
 - SQLite indexes -> PostgreSQL's advanced index types
 
 ### To Oracle
+
 - `INTEGER PRIMARY KEY AUTOINCREMENT` -> `NUMBER` + `SEQUENCE` + `TRIGGER`
 - `TEXT` -> `VARCHAR2` or `CLOB`
 - `REAL` -> `NUMBER`
@@ -154,4 +169,4 @@ WHERE articles MATCH 'python AND programming';
 - Concurrent write operations are limited
 - Complex triggers and stored procedures are not supported
 - Table and column ALTER operations are limited
-- Some advanced database features are not available (partitioning, materialized views, etc.) 
+- Some advanced database features are not available (partitioning, materialized views, etc.)

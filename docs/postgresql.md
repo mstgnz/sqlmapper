@@ -1,11 +1,13 @@
 # PostgreSQL Features and Usage
 
 ## Overview
+
 SQLMapper provides comprehensive support for converting PostgreSQL database schemas to other database systems. This document outlines PostgreSQL-specific features and usage examples.
 
 ## Supported Features
 
 ### Data Types
+
 - Numeric: `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `NUMERIC`, `REAL`, `DOUBLE PRECISION`
 - Text: `CHAR`, `VARCHAR`, `TEXT`
 - Date/Time: `DATE`, `TIME`, `TIMESTAMP`, `INTERVAL`
@@ -17,6 +19,7 @@ SQLMapper provides comprehensive support for converting PostgreSQL database sche
 - Special: `UUID`, `XML`, `MONEY`
 
 ### Table Features
+
 - Auto-incrementing fields (`SERIAL`, `BIGSERIAL`)
 - Table and column comments
 - Tablespace definitions
@@ -24,6 +27,7 @@ SQLMapper provides comprehensive support for converting PostgreSQL database sche
 - Partitioned tables
 
 ### Indexes
+
 - B-tree indexes
 - Hash indexes
 - GiST indexes
@@ -34,6 +38,7 @@ SQLMapper provides comprehensive support for converting PostgreSQL database sche
 - Expression indexes
 
 ### Constraints
+
 - `NOT NULL`
 - `UNIQUE`
 - `PRIMARY KEY`
@@ -45,6 +50,7 @@ SQLMapper provides comprehensive support for converting PostgreSQL database sche
 ## Usage Examples
 
 ### Simple Table Creation
+
 ```sql
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
@@ -60,6 +66,7 @@ COMMENT ON COLUMN users.email IS 'Unique email address of the user';
 ```
 
 ### Related Tables and Inheritance
+
 ```sql
 CREATE TABLE employees (
     id SERIAL PRIMARY KEY,
@@ -76,6 +83,7 @@ CREATE TABLE managers (
 ```
 
 ### Advanced Index Usage
+
 ```sql
 -- B-tree index
 CREATE INDEX idx_user_name ON users (name);
@@ -95,6 +103,7 @@ CREATE INDEX idx_properties ON products USING GIN (properties);
 ```
 
 ### Views and Materialized Views
+
 ```sql
 -- Regular view
 CREATE VIEW active_orders AS
@@ -105,7 +114,7 @@ WHERE o.status = 'active';
 
 -- Materialized view
 CREATE MATERIALIZED VIEW monthly_sales_summary AS
-SELECT 
+SELECT
     date_trunc('month', date) as month,
     sum(amount) as total_sales,
     count(*) as order_count
@@ -115,6 +124,7 @@ WITH DATA;
 ```
 
 ### Triggers and Functions
+
 ```sql
 CREATE OR REPLACE FUNCTION update_timestamp()
 RETURNS TRIGGER AS $$
@@ -133,18 +143,21 @@ CREATE TRIGGER tr_update_timestamp
 ## Conversion Notes
 
 ### To MySQL
+
 - `SERIAL` -> `AUTO_INCREMENT`
 - `INTERVAL` -> `VARCHAR` or `INT`
 - Inheritance tables -> Split into separate tables
 - CHECK constraints -> Not supported before MySQL 8.0.16
 
 ### To SQLite
+
 - `SERIAL` -> `AUTOINCREMENT`
 - Complex data types -> `TEXT` or `BLOB`
 - Materialized views -> Regular views or tables
 - GiST/GIN indexes -> Not supported
 
 ### To Oracle
+
 - `SERIAL` -> `SEQUENCE` and `TRIGGER`
 - `VARCHAR` -> `VARCHAR2`
 - `TEXT` -> `CLOB`
@@ -163,4 +176,4 @@ CREATE TRIGGER tr_update_timestamp
 - Some PostgreSQL-specific features may not be perfectly converted to other databases
 - Complex functions and procedures might need manual adjustment
 - Custom data types may be simplified during conversion
-- Performance may vary with large schemas 
+- Performance may vary with large schemas

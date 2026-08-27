@@ -1,11 +1,13 @@
 # MySQL Features and Usage
 
 ## Overview
+
 SQLMapper provides comprehensive support for converting MySQL database schemas to other database systems. This document outlines MySQL-specific features and usage examples.
 
 ## Supported Features
 
 ### Data Types
+
 - Numeric: `INT`, `TINYINT`, `SMALLINT`, `MEDIUMINT`, `BIGINT`, `DECIMAL`, `FLOAT`, `DOUBLE`
 - Text: `CHAR`, `VARCHAR`, `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`
 - Date/Time: `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `YEAR`
@@ -13,12 +15,14 @@ SQLMapper provides comprehensive support for converting MySQL database schemas t
 - Others: `ENUM`, `SET`, `JSON`
 
 ### Table Features
+
 - Auto-incrementing fields (`AUTO_INCREMENT`)
 - Table comments (`COMMENT`)
 - Table character set and collation
 - Storage engines (InnoDB, MyISAM, etc.)
 
 ### Indexes
+
 - Primary keys
 - Foreign keys
 - Unique indexes
@@ -26,6 +30,7 @@ SQLMapper provides comprehensive support for converting MySQL database schemas t
 - Full-text indexes
 
 ### Constraints
+
 - `NOT NULL`
 - `UNIQUE`
 - `PRIMARY KEY`
@@ -36,6 +41,7 @@ SQLMapper provides comprehensive support for converting MySQL database schemas t
 ## Usage Examples
 
 ### Simple Table Creation
+
 ```sql
 CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,6 +54,7 @@ CREATE TABLE users (
 ```
 
 ### Related Tables
+
 ```sql
 CREATE TABLE categories (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -68,6 +75,7 @@ CREATE TABLE products (
 ```
 
 ### Index Usage
+
 ```sql
 CREATE TABLE articles (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -81,6 +89,7 @@ CREATE TABLE articles (
 ```
 
 ### View Creation
+
 ```sql
 CREATE VIEW active_products AS
 SELECT p.id, p.name, p.price, c.name AS category_name
@@ -90,6 +99,7 @@ WHERE p.stock > 0;
 ```
 
 ### Trigger Creation
+
 ```sql
 DELIMITER //
 CREATE TRIGGER product_update_log
@@ -105,18 +115,21 @@ DELIMITER ;
 ## Conversion Notes
 
 ### To PostgreSQL
+
 - `AUTO_INCREMENT` -> `SERIAL` or `IDENTITY`
 - `UNSIGNED` -> Removed (PostgreSQL doesn't support it)
 - `ON UPDATE CURRENT_TIMESTAMP` -> Simulated using triggers
 - `ENUM` -> PostgreSQL's native `ENUM` type or `CHECK` constraint
 
 ### To SQLite
+
 - `AUTO_INCREMENT` -> `AUTOINCREMENT`
 - Complex data types -> `TEXT` or `BLOB`
 - Foreign key constraints -> Limited FK support in SQLite
 - Triggers -> Simplified trigger syntax
 
 ### To Oracle
+
 - `AUTO_INCREMENT` -> `SEQUENCE` and `TRIGGER`
 - `TIMESTAMP` -> `DATE` or `TIMESTAMP`
 - `VARCHAR` -> `VARCHAR2`
@@ -135,4 +148,4 @@ DELIMITER ;
 - Some MySQL-specific features may not be perfectly converted to other databases
 - Complex triggers might need manual adjustment
 - Some data types may be simplified during conversion
-- Performance may vary with large schemas 
+- Performance may vary with large schemas
