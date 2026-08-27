@@ -37,13 +37,23 @@ constraints, indexes, and views. Type mapping is dialect-aware: a PostgreSQL
 PostgreSQL enum type, an array column becomes JSON on the way to MySQL, and a
 column driven by a sequence becomes AUTO_INCREMENT or SERIAL as appropriate.
 
+# Expressions
+
+Check constraints, column defaults and the WHERE clause of a view are parsed
+into a syntax tree and written back out for the target rather than copied as
+text. PostgreSQL's ((amount >= (0)::numeric)) and SQL Server's (([amount]>=(0)))
+both become amount >= 0; a view saying WHERE is_active becomes
+WHERE is_active <> 0 for Oracle and SQL Server, which have no boolean type; and
+each dialect's spelling of the current timestamp becomes the target's. An
+expression the parser cannot read is passed through unchanged.
+
 # What is not converted
 
 Function, procedure and trigger bodies are parsed into the schema but are not
-translated, because their contents are procedural code rather than DDL. View
-bodies are carried over verbatim: the SELECT is emitted unchanged, so a view
-written against dialect-specific functions may need editing by hand. Table data
-(INSERT statements) is not carried across.
+translated, because their contents are procedural code rather than DDL. The
+parts of a view body outside the WHERE clause are carried over verbatim, so a
+view written against dialect-specific functions may need editing by hand. Table
+data (INSERT statements) is not carried across.
 
 The parsers are regular-expression based. They handle the output of mysqldump
 and pg_dump, but they are not full SQL grammars: deeply nested procedural bodies

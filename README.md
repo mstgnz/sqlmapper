@@ -86,12 +86,12 @@ func main() {
 
 Every dialect package exposes the same two methods, so any pair works the same way:
 
-| Dialect | Constructor |
-| --- | --- |
-| MySQL | `mysql.NewMySQL()` |
+| Dialect    | Constructor                |
+| ---------- | -------------------------- |
+| MySQL      | `mysql.NewMySQL()`         |
 | PostgreSQL | `postgres.NewPostgreSQL()` |
-| SQLite | `sqlite.NewSQLite()` |
-| Oracle | `oracle.NewOracle()` |
+| SQLite     | `sqlite.NewSQLite()`       |
+| Oracle     | `oracle.NewOracle()`       |
 | SQL Server | `sqlserver.NewSQLServer()` |
 
 ### Streaming large dumps
@@ -116,22 +116,22 @@ err := parser.ParseStream(file, func(obj stream.SchemaObject) error {
 
 Type mapping is dialect-aware, not a lookup table with a default. Some cases it handles:
 
-| Source | Target | Result |
-| --- | --- | --- |
-| PostgreSQL `character varying(255)` | MySQL | `VARCHAR(255)` |
-| PostgreSQL `text[]` | MySQL | `JSON` |
-| PostgreSQL `bigint` + `nextval(...)` | MySQL | `BIGINT AUTO_INCREMENT` |
-| PostgreSQL `boolean DEFAULT true` | MySQL | `TINYINT(1) DEFAULT 1` |
-| MySQL `ENUM('a','b')` | PostgreSQL | `CREATE TYPE ... AS ENUM` |
-| MySQL `bigint AUTO_INCREMENT` | PostgreSQL | `BIGSERIAL` |
-| MySQL `json` | PostgreSQL | `JSONB` |
+| Source                               | Target     | Result                    |
+| ------------------------------------ | ---------- | ------------------------- |
+| PostgreSQL `character varying(255)`  | MySQL      | `VARCHAR(255)`            |
+| PostgreSQL `text[]`                  | MySQL      | `JSON`                    |
+| PostgreSQL `bigint` + `nextval(...)` | MySQL      | `BIGINT AUTO_INCREMENT`   |
+| PostgreSQL `boolean DEFAULT true`    | MySQL      | `TINYINT(1) DEFAULT 1`    |
+| MySQL `ENUM('a','b')`                | PostgreSQL | `CREATE TYPE ... AS ENUM` |
+| MySQL `bigint AUTO_INCREMENT`        | PostgreSQL | `BIGSERIAL`               |
+| MySQL `json`                         | PostgreSQL | `JSONB`                   |
 
 ## What is not converted
 
 Be aware of these before you trust the output:
 
 - **Function, procedure and trigger bodies.** They are parsed into the schema but not translated, because they are procedural code, not DDL. PL/pgSQL and MySQL's `BEGIN ... END` are different languages.
-- **View bodies.** The `CREATE VIEW` wrapper is generated for the target dialect, but the `SELECT` is copied verbatim. A view that calls dialect-specific functions will need editing.
+- **Most of a view body.** The `CREATE VIEW` wrapper and the `WHERE` clause are converted; the select list, the joins and anything else are copied verbatim. A view that calls dialect-specific functions outside the `WHERE` clause will need editing.
 - **Table data.** `INSERT` statements and `COPY` blocks are skipped. This is a schema tool.
 - **Storage and tuning clauses.** Tablespaces, storage parameters, partitioning and engine options survive only where the target has an equivalent.
 
@@ -145,26 +145,20 @@ an SSMS-shaped script both SQL Server versions accept), converting it, and
 loading the result into the target server.
 
 | Source \ Target | PG 13 | PG 17 | MySQL 5.7 | MySQL 8.4 | MariaDB 11 | Oracle 21 | Oracle 23ai | MSSQL 2019 | MSSQL 2022 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| PostgreSQL 13 | - | pass | pass | pass | pass | tables[^v] | pass | tables[^v] | tables[^v] |
-| PostgreSQL 17 | pass | - | pass | pass | pass | tables[^v] | pass | tables[^v] | tables[^v] |
-| MySQL 5.7 | pass | pass | - | pass | pass | pass | pass | pass | pass |
-| MySQL 8.4 | pass | pass | pass | - | pass | pass | pass | pass | pass |
-| MariaDB 11 | pass | pass | pass | pass | - | pass | pass | pass | pass |
-| Oracle 21 XE | pass | pass | pass | pass | pass | - | pass | pass | pass |
-| Oracle 23ai | pass | pass | pass | pass | pass | pass | - | pass | pass |
-| SQL Server[^s] | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| --------------- | ----- | ----- | --------- | --------- | ---------- | --------- | ----------- | ---------- | ---------- |
+| PostgreSQL 13   | -     | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
+| PostgreSQL 17   | pass  | -     | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
+| MySQL 5.7       | pass  | pass  | -         | pass      | pass       | pass      | pass        | pass       | pass       |
+| MySQL 8.4       | pass  | pass  | pass      | -         | pass       | pass      | pass        | pass       | pass       |
+| MariaDB 11      | pass  | pass  | pass      | pass      | -          | pass      | pass        | pass       | pass       |
+| Oracle 21 XE    | pass  | pass  | pass      | pass      | pass       | -         | pass        | pass       | pass       |
+| Oracle 23ai     | pass  | pass  | pass      | pass      | pass       | pass      | -           | pass       | pass       |
+| SQL Server[^s]  | pass  | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
 
-[^s]: SQL Server has no dump CLI in the box. The source script is in the shape
-SSMS "Generate Scripts" produces, and both 2019 and 2022 accept it verbatim,
-which is what makes it a real fixture rather than a convenient one.
-
-[^v]: Tables, columns, keys, constraints and indexes all load. The **view** does
-not, and the reason is worth understanding: its body says `WHERE is_active`,
-PostgreSQL's shorthand for a boolean column. Oracle 21 and SQL Server have no
-boolean type, so they reject the expression. View bodies are copied verbatim
-(see [what is not converted](#what-is-not-converted)); translating query syntax
-is out of scope. Oracle 23ai accepts it because it added a native boolean.
+[^s]:
+    SQL Server has no dump CLI in the box. The source script is in the shape
+    SSMS "Generate Scripts" produces, and both 2019 and 2022 accept it verbatim,
+    which is what makes it a real fixture rather than a convenient one.
 
 Version differences the converter has to handle, all of them found by running
 this matrix rather than by reading documentation:
@@ -182,11 +176,40 @@ this matrix rather than by reading documentation:
   `ON [PRIMARY]` filegroup to each key and index, writes `IDENTITY(1,1)` with a
   comma inside the column definition, and states defaults, foreign keys and
   checks as separate `ALTER TABLE` statements.
+- A PostgreSQL view body says `WHERE is_active`, which Oracle 21 and SQL Server
+  reject because they have no boolean type. Expressions are parsed rather than
+  copied, so that becomes `WHERE is_active <> 0` on the way out.
 
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and
 below, SQL Server 2016 and below, partitioned tables, generated columns, and
 spatial types.
+
+## How expressions are converted
+
+Check constraints, column defaults and the `WHERE` clause of a view are parsed
+into a small syntax tree and written back out for the target, rather than copied
+across as text. That is what lets these survive a hop between dialects:
+
+| Source                        | Target             | Result                 |
+| ----------------------------- | ------------------ | ---------------------- |
+| `((amount >= (0)::numeric))`  | MySQL              | `amount >= 0`          |
+| `(([amount]>=(0)))`           | PostgreSQL         | `amount >= 0`          |
+| `WHERE is_active`             | Oracle, SQL Server | `WHERE is_active <> 0` |
+| `now()`                       | Oracle             | `SYSTIMESTAMP`         |
+| `sysutcdatetime()`            | PostgreSQL         | `now()`                |
+| `SELECT id FROM public.users` | MySQL              | `SELECT id FROM users` |
+| `CHECK (json_valid(meta))`    | anywhere but MySQL | dropped                |
+
+The tree has no node for a parenthesis, which is why the redundant ones dump
+tools emit do not survive the trip.
+
+An expression the parser cannot read is passed through unchanged, so a schema
+that converted before this existed still converts.
+
+What is _not_ parsed: the rest of a view body, and function, procedure and
+trigger bodies. Those are statements and procedural code rather than
+expressions, and they are still copied verbatim.
 
 ## Type mapping choices
 

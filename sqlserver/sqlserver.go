@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/expr"
 )
 
 // Real SQL Server scripts come out of SSMS "Generate Scripts", which brackets
@@ -304,7 +305,7 @@ func (s *SQLServer) applySQLServerAlterConstraint(tableIndex int, stmt string) b
 		table.Constraints = append(table.Constraints, sqlmapper.Constraint{
 			Name:            unbracketIdent(m[2]),
 			Type:            "CHECK",
-			CheckExpression: cleanSQLServerExpression(m[3]),
+			CheckExpression: expr.Normalize(m[3]),
 		})
 		return true
 	}
@@ -322,20 +323,6 @@ func unbracketList(raw string) []string {
 		}
 	}
 	return out
-}
-
-// cleanSQLServerExpression removes the brackets and the redundant parentheses
-// SSMS wraps around every expression, so a check reads the same in any dialect.
-func cleanSQLServerExpression(expr string) string {
-	expr = strings.NewReplacer("[", "", "]", "").Replace(strings.TrimSpace(expr))
-	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
-		inner := strings.TrimSpace(expr[1 : len(expr)-1])
-		if inner == "" || strings.Count(inner, "(") != strings.Count(inner, ")") {
-			break
-		}
-		expr = inner
-	}
-	return expr
 }
 
 // toSQLServerType maps the shared type vocabulary onto SQL Server's own types.
@@ -370,19 +357,6 @@ var sqlServerNoLengthTypes = map[string]bool{
 	"XML": true, "REAL": true, "FLOAT": true, "BIT": true, "INT": true,
 	"BIGINT": true, "SMALLINT": true, "TINYINT": true, "MONEY": true,
 	"UNIQUEIDENTIFIER": true,
-}
-
-// mssForeignSchemaRe matches the default schema qualifier of the other dialects.
-var mssForeignSchemaRe = regexp.MustCompile(`(?i)\bpublic\.`)
-
-// mssPGCastRe matches PostgreSQL's ::type cast suffix, which SQL Server rejects.
-var mssPGCastRe = regexp.MustCompile(`::\s*[a-zA-Z_][\w]*(\s+[a-zA-Z_][\w]*)*(\s*\(\s*\d+(\s*,\s*\d+)?\s*\))?(\s*\[\s*\])?`)
-
-// toSQLServerExpression rewrites an expression borrowed from another dialect.
-func toSQLServerExpression(expr string) string {
-	expr = mssPGCastRe.ReplaceAllString(expr, "")
-	expr = mssForeignSchemaRe.ReplaceAllString(expr, "")
-	return strings.TrimSpace(expr)
 }
 
 // resolveType maps a column onto the SQL Server type it should be declared as.
@@ -430,7 +404,7 @@ func (s *SQLServer) defaultLiteral(col sqlmapper.Column, mssType string) string 
 		return dv
 	}
 	if strings.ContainsAny(dv, "()") {
-		return toSQLServerExpression(dv)
+		return expr.Value(dv, expr.SQLServer)
 	}
 	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
 }
@@ -469,7 +443,7 @@ func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 			sb.WriteString(" ON UPDATE " + c.UpdateRule)
 		}
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", toSQLServerExpression(c.CheckExpression)))
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.SQLServer)))
 	}
 	return sb.String()
 }
@@ -499,7 +473,7 @@ func (s *SQLServer) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper
 			// MariaDB emulates a JSON column with LONGTEXT plus a json_valid()
 			// guard. SQL Server has no such function, so the check would only
 			// break the load.
-			if sqlmapper.IsJSONEmulationCheck(c.CheckExpression) {
+			if expr.IsJSONGuardSQL(c.CheckExpression) {
 				continue
 			}
 			tableConstraints = append(tableConstraints, c)
@@ -897,7 +871,7 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Views are emitted last so the tables they select from already exist.
 	for _, view := range schema.Views {
-		body := toSQLServerExpression(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"))
+		body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLServer)
 		fmt.Fprintf(s.buf, "CREATE VIEW %s AS %s;\nGO\n", view.Name, body)
 	}
 

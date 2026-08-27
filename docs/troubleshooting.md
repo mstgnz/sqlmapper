@@ -8,12 +8,12 @@ The whole flag set is four options. Anything else you read elsewhere does not ex
 sqlmapper --file=<path> --to=<target> [--from=<source>] [--out=<path>]
 ```
 
-| Flag | Meaning |
-| --- | --- |
-| `--file` | Input SQL dump. Required. |
-| `--to` | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
-| `--from` | Source dialect. Detected from the dump when omitted. |
-| `--out` | Output path. Defaults to `<input>_<target>.sql` beside the input. |
+| Flag     | Meaning                                                                         |
+| -------- | ------------------------------------------------------------------------------- |
+| `--file` | Input SQL dump. Required.                                                       |
+| `--to`   | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
+| `--from` | Source dialect. Detected from the dump when omitted.                            |
+| `--out`  | Output path. Defaults to `<input>_<target>.sql` beside the input.               |
 
 Single and double dashes are equivalent, so `-file=dump.sql` and `--file=dump.sql` both work.
 
@@ -41,6 +41,12 @@ The parsers are regular-expression based rather than a full SQL grammar. The usu
 ### The output is missing objects
 
 `Generate` emits tables, columns, constraints, indexes and views. Functions, procedures and triggers are parsed into the schema but not written out, because their bodies are procedural code rather than DDL. Table data is not carried across at all. See [what is not converted](../README.md#what-is-not-converted).
+
+### An expression came out unchanged when it should have been translated
+
+Check constraints, column defaults and a view's `WHERE` clause are parsed and rewritten for the target. Anything the expression parser cannot read is passed through exactly as it arrived, on the principle that a conversion that used to work should keep working. If you find an expression that survives untranslated and should not, the fragment itself is the bug report.
+
+The rest of a view body, and function, procedure and trigger bodies, are copied verbatim by design.
 
 ### The generated SQL will not run
 
@@ -104,7 +110,13 @@ ALTER TABLE employees ADD COLUMN row_identifier BIGSERIAL;
 
 ### Foreign keys fail because of table order
 
-Tables are emitted in the order they appear in the source, which is not necessarily an order that satisfies the foreign keys. Defer the checks around the load:
+They should not: tables are sorted so that a table follows the ones its foreign
+keys point at, and a key that closes a reference cycle is emitted as a trailing
+`ALTER TABLE` instead of inline. If you still hit an ordering failure, that is a
+bug worth reporting.
+
+If you need to load a hand-edited script that is out of order, defer the checks
+around it:
 
 ```sql
 -- MySQL

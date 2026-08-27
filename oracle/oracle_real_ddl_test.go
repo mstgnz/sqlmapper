@@ -192,10 +192,18 @@ func TestOracleDefaultLiteral(t *testing.T) {
 	assert.Equal(t, "'it''s'", o.defaultLiteral(sqlmapper.Column{DefaultValue: "it's"}, "VARCHAR2(20)"))
 }
 
-func TestToOracleExpression(t *testing.T) {
-	assert.Equal(t, "(amount >= (0))", toOracleExpression("(amount >= (0)::numeric)"))
-	assert.Equal(t, "SELECT id FROM users", toOracleExpression("SELECT id FROM public.users"))
-	assert.Equal(t, "SELECT u.id FROM users u", toOracleExpression("SELECT u.id FROM users u"))
+// TestGeneratedExpressionsAreTranslated checks the behaviour through the
+// generator; the expression layer itself is tested in internal/expr.
+func TestGeneratedExpressionsAreTranslated(t *testing.T) {
+	o := &Oracle{}
+
+	assert.Equal(t, "CHECK (amount >= 0)",
+		o.generateConstraintSQL(sqlmapper.Constraint{Type: "CHECK", CheckExpression: "(amount >= (0)::numeric)"}))
+
+	// Oracle has no boolean, so a bare column used as a condition has to be
+	// written as a comparison or the statement will not parse.
+	assert.Equal(t, "CHECK (is_active <> 0)",
+		o.generateConstraintSQL(sqlmapper.Constraint{Type: "CHECK", CheckExpression: "is_active"}))
 }
 
 func TestOracleGenerateFromForeignSchema(t *testing.T) {

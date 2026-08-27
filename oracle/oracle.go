@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/expr"
 )
 
 // oracleTypeWithLenRe splits an embedded precision off a type, e.g.
@@ -722,7 +723,7 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 	// Create views
 	for _, view := range schema.Views {
 		fmt.Fprintf(&result, "CREATE OR REPLACE VIEW %s AS\n%s;\n\n",
-			view.Name, toOracleExpression(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";")))
+			view.Name, expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.Oracle))
 	}
 
 	// Create triggers
@@ -1096,21 +1097,6 @@ var oracleNoLengthTypes = map[string]bool{
 	"BINARY_DOUBLE": true, "INTERVAL DAY TO SECOND": true,
 }
 
-// toOracleExpression rewrites an expression borrowed from another dialect:
-// their default schema qualifiers do not resolve here.
-func toOracleExpression(expr string) string {
-	expr = oraclePGCastRe.ReplaceAllString(expr, "")
-	expr = oracleForeignSchemaRe.ReplaceAllString(expr, "")
-	return strings.TrimSpace(expr)
-}
-
-// oraclePGCastRe matches PostgreSQL's ::type cast suffix, which Oracle rejects.
-var oraclePGCastRe = regexp.MustCompile(`::\s*[a-zA-Z_][\w]*(\s+[a-zA-Z_][\w]*)*(\s*\(\s*\d+(\s*,\s*\d+)?\s*\))?(\s*\[\s*\])?`)
-
-// oracleForeignSchemaRe matches the default schema qualifier of the other
-// dialects. Only those two names are stripped, so alias.column survives.
-var oracleForeignSchemaRe = regexp.MustCompile(`(?i)\b(?:public|dbo)\.`)
-
 // resolveType maps a column onto the Oracle type it should be declared as.
 func (o *Oracle) resolveType(col sqlmapper.Column) string {
 	lower := strings.ToLower(strings.TrimSpace(col.DataType))
@@ -1186,7 +1172,7 @@ func (o *Oracle) defaultLiteral(col sqlmapper.Column, oracleType string) string 
 		return dv
 	}
 	if strings.ContainsAny(dv, "()") {
-		return toOracleExpression(dv)
+		return expr.Value(dv, expr.Oracle)
 	}
 	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
 }
@@ -1228,7 +1214,7 @@ func (o *Oracle) generateConstraintSQL(c sqlmapper.Constraint) string {
 			sb.WriteString(" ON DELETE SET NULL")
 		}
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", toOracleExpression(c.CheckExpression)))
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.Oracle)))
 	}
 	return sb.String()
 }
@@ -1261,7 +1247,7 @@ func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Co
 			// MariaDB emulates a JSON column with LONGTEXT plus a json_valid()
 			// guard. Oracle has no such function, and the column maps to a CLOB
 			// here, so the check would only break the load.
-			if sqlmapper.IsJSONEmulationCheck(c.CheckExpression) {
+			if expr.IsJSONGuardSQL(c.CheckExpression) {
 				continue
 			}
 			tableConstraints = append(tableConstraints, c)

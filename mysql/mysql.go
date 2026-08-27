@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/expr"
 )
 
 // toMySQLType maps any source database type (MySQL or PostgreSQL) to the MySQL equivalent.
@@ -101,7 +102,7 @@ var (
 	mysqlConstraintRe   = regexp.MustCompile(`(?i)CONSTRAINT\s+` + "`?" + `(\w+)` + "`?" + `\s+(.*)`)
 	mysqlPKRe           = regexp.MustCompile(`(?i)PRIMARY\s+KEY\s*\(([^)]+)\)`)
 	mysqlFKRe           = regexp.MustCompile(`(?i)FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\(([^)]+)\)`)
-	mysqlUniqueRe       = regexp.MustCompile(`(?i)UNIQUE\s*(?:KEY\s+\w+\s*)?\(([^)]+)\)`)
+	mysqlUniqueRe       = regexp.MustCompile(`(?i)UNIQUE\s*(?:KEY\s+(\w+)\s*)?\(([^)]+)\)`)
 )
 
 // mysqlDefaultStopWords marks the tokens that end a DEFAULT clause. NULL is
@@ -114,15 +115,6 @@ var mysqlDefaultStopWords = map[string]bool{
 	"COLLATE": true, "CHARACTER": true, "GENERATED": true, "STORAGE": true,
 	"VIRTUAL": true, "STORED": true, "INVISIBLE": true,
 }
-
-// mysqlPGCastRe matches PostgreSQL's ::type cast suffix, which is meaningless in
-// MySQL and has to be stripped from any expression copied across.
-var mysqlPGCastRe = regexp.MustCompile(`::\s*[a-zA-Z_][\w]*(\s+[a-zA-Z_][\w]*)*(\s*\(\s*\d+(\s*,\s*\d+)?\s*\))?(\s*\[\s*\])?`)
-
-// mysqlPGPublicRe matches the default schema qualifier of the other dialects.
-// Only those two names are stripped: a general schema.table rewrite would also
-// eat legitimate alias.column references inside a view body.
-var mysqlPGPublicRe = regexp.MustCompile(`(?i)\b(?:public|dbo)\.`)
 
 // takeUntilStopWord returns the leading tokens of s up to the first stop word
 // that appears at paren depth zero and outside a string literal.
@@ -177,15 +169,6 @@ func stripSchemaPrefix(name string) string {
 		return strings.Trim(parts[len(parts)-1], `"`)
 	}
 	return name
-}
-
-// toMySQLExpression rewrites an expression borrowed from another dialect into
-// something MySQL will accept: PostgreSQL casts are dropped and the outer pair of
-// redundant parentheses is left intact for the caller to wrap.
-func toMySQLExpression(expr string) string {
-	expr = mysqlPGCastRe.ReplaceAllString(expr, "")
-	expr = mysqlPGPublicRe.ReplaceAllString(expr, "")
-	return strings.TrimSpace(expr)
 }
 
 // columnIsAutoIncrement reports whether the named column of table is an
@@ -296,7 +279,7 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 // unchanged; only the wrapper is dialect-specific. MySQL has no materialized
 // views, so one arriving from PostgreSQL or Oracle degrades to a plain view.
 func (m *MySQL) generateViewSQL(view sqlmapper.View) string {
-	body := toMySQLExpression(strings.TrimSpace(view.Definition))
+	body := expr.TranslateViewBody(strings.TrimSpace(view.Definition), expr.MySQL)
 	body = strings.TrimSuffix(body, ";")
 	return fmt.Sprintf("CREATE VIEW %s AS %s;", stripSchemaPrefix(view.Name), body)
 }
@@ -656,8 +639,13 @@ func (m *MySQL) parseConstraint(def string) (sqlmapper.Constraint, error) {
 
 	case strings.HasPrefix(defUpper, "UNIQUE") || strings.HasPrefix(defUpper, "UNIQUE KEY"):
 		constraint.Type = "UNIQUE"
-		if m := mysqlUniqueRe.FindStringSubmatch(def); len(m) > 1 {
-			constraint.Columns = splitAndTrim(m[1])
+		if m := mysqlUniqueRe.FindStringSubmatch(def); len(m) > 2 {
+			// mysqldump puts the index name between the keyword and the column
+			// list. Skipping over it dropped a name the target can keep.
+			if constraint.Name == "" && m[1] != "" {
+				constraint.Name = m[1]
+			}
+			constraint.Columns = splitAndTrim(m[2])
 		}
 
 	case strings.Contains(defUpper, "CHECK"):
@@ -972,7 +960,7 @@ func (m *MySQL) defaultLiteral(column sqlmapper.Column, mysqlType string) string
 		return dv
 	}
 	if strings.ContainsAny(dv, "()") {
-		return toMySQLExpression(dv)
+		return expr.Value(dv, expr.MySQL)
 	}
 	return fmt.Sprintf("'%s'", strings.ReplaceAll(dv, "'", "''"))
 }
@@ -1062,7 +1050,7 @@ func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 	case "UNIQUE":
 		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", toMySQLExpression(c.CheckExpression)))
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.MySQL)))
 	}
 	return sb.String()
 }

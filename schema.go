@@ -1,6 +1,6 @@
 package sqlmapper
 
-import "regexp"
+import "github.com/mstgnz/sqlmapper/internal/expr"
 
 // DatabaseType represents the supported database types
 type DatabaseType string
@@ -399,9 +399,6 @@ func OrderTablesByDependency(tables []Table) ([]Table, map[string][]Constraint) 
 	return ordered, deferred
 }
 
-// jsonEmulationCheckRe matches MariaDB's json_valid() guard.
-var jsonEmulationCheckRe = regexp.MustCompile(`(?i)\bjson_valid\s*\(`)
-
 // IsJSONEmulationCheck reports whether a CHECK constraint exists only to emulate
 // a JSON column type.
 //
@@ -409,7 +406,10 @@ var jsonEmulationCheckRe = regexp.MustCompile(`(?i)\bjson_valid\s*\(`)
 // CHECK (json_valid(col)) to police it. Every other dialect either has a real
 // JSON type or has nothing, and none of them has a json_valid function, so
 // carrying the check across turns a working schema into one that will not load.
-// Generators use this to drop it.
+//
+// Deprecated: the generators decide this for themselves now, by parsing the
+// expression rather than matching text against it. This is kept because it was
+// exported in v1.1.0 and will be removed in the next major version.
 func IsJSONEmulationCheck(expression string) bool {
-	return jsonEmulationCheckRe.MatchString(expression)
+	return expr.IsJSONGuardSQL(expression)
 }

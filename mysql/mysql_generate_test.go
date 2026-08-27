@@ -84,7 +84,9 @@ func TestDefaultLiteral(t *testing.T) {
 		{"blob takes no default", sqlmapper.Column{DefaultValue: "x"}, "BLOB", ""},
 
 		// Expressions are carried over with PostgreSQL syntax stripped.
-		{"cast is stripped", sqlmapper.Column{DefaultValue: "(0)::numeric"}, "DECIMAL(10,2)", "(0)"},
+		// The expression layer drops the cast and the parentheses the dump put
+		// around the value, because the tree records neither.
+		{"cast is stripped", sqlmapper.Column{DefaultValue: "(0)::numeric"}, "DECIMAL(10,2)", "0"},
 	}
 
 	for _, tt := range tests {
@@ -127,9 +129,11 @@ func TestGenerateConstraintSQL(t *testing.T) {
 			"CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE RESTRICT",
 		},
 		{
+			// The expression layer drops the cast and, because the tree has no
+			// node for a parenthesis, the redundant ones the dump wrote as well.
 			"check drops PostgreSQL casts",
 			sqlmapper.Constraint{Name: "chk", Type: "CHECK", CheckExpression: "(amount >= (0)::numeric)"},
-			"CONSTRAINT chk CHECK ((amount >= (0)))",
+			"CONSTRAINT chk CHECK (amount >= 0)",
 		},
 		{
 			"unknown type renders nothing but its name",
@@ -182,26 +186,48 @@ func TestGenerateViewSQL(t *testing.T) {
 	}
 }
 
-func TestToMySQLExpression(t *testing.T) {
+// TestGeneratedExpressionsAreTranslated checks the behaviour through the
+// generator rather than through a helper: the expression layer itself is tested
+// in internal/expr, and what matters here is that the generator routes through
+// it.
+func TestGeneratedExpressionsAreTranslated(t *testing.T) {
 	tests := []struct {
 		name string
-		in   string
+		c    sqlmapper.Constraint
 		want string
 	}{
-		{"leaves plain expressions alone", "amount >= 0", "amount >= 0"},
-		{"strips a simple cast", "(0)::numeric", "(0)"},
-		{"strips a multi-word cast", "'x'::character varying", "'x'"},
-		{"strips a parameterised cast", "'x'::varchar(50)", "'x'"},
-		{"strips an array cast", "'{}'::text[]", "'{}'"},
-		{"strips the public schema", "SELECT id FROM public.users", "SELECT id FROM users"},
-		{"leaves other qualifiers alone", "SELECT u.id FROM users u", "SELECT u.id FROM users u"},
+		{
+			"a cast is dropped",
+			sqlmapper.Constraint{Type: "CHECK", CheckExpression: "(amount >= (0)::numeric)"},
+			"CHECK (amount >= 0)",
+		},
+		{
+			"redundant parentheses are dropped",
+			sqlmapper.Constraint{Type: "CHECK", CheckExpression: "((status IN ('a','b')))"},
+			"CHECK (status IN ('a', 'b'))",
+		},
+		{
+			"an unreadable expression survives unchanged",
+			sqlmapper.Constraint{Type: "CHECK", CheckExpression: "a @> b[1:2]"},
+			"CHECK (a @> b[1:2])",
+		},
 	}
 
+	m := &MySQL{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, toMySQLExpression(tt.in))
+			assert.Equal(t, tt.want, m.generateConstraintSQL(tt.c))
 		})
 	}
+}
+
+func TestGeneratedViewDropsForeignSchema(t *testing.T) {
+	m := &MySQL{}
+	got := m.generateViewSQL(sqlmapper.View{
+		Name:       "v",
+		Definition: "SELECT id FROM public.users WHERE is_active",
+	})
+	assert.Equal(t, "CREATE VIEW v AS SELECT id FROM users WHERE is_active;", got)
 }
 
 func TestColumnIsAutoIncrement(t *testing.T) {

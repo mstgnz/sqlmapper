@@ -160,8 +160,9 @@ func TestRealSSMS_AlterTableForms(t *testing.T) {
 		assert.Equal(t, "CASCADE", fk.DeleteRule)
 
 		require.Contains(t, byType, "CHECK")
-		assert.Equal(t, "amount>=(0)", byType["CHECK"].CheckExpression,
-			"the brackets and the outer parentheses come off")
+		// The expression layer normalises at parse time, so the model holds a
+		// dialect-neutral expression rather than SQL Server's bracket syntax.
+		assert.Equal(t, "amount >= 0", byType["CHECK"].CheckExpression)
 	})
 
 	t.Run("keys survive the option blocks", func(t *testing.T) {

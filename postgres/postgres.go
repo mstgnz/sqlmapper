@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/expr"
 )
 
 // toPostgresType maps any source database type (MySQL or PostgreSQL) to the PostgreSQL equivalent.
@@ -248,7 +249,7 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 // generateViewSQL renders a view definition. The SELECT body is passed through
 // unchanged; only the wrapper is dialect-specific.
 func (p *PostgreSQL) generateViewSQL(view sqlmapper.View) string {
-	body := stripForeignDefaultSchema(strings.TrimSpace(view.Definition))
+	body := expr.TranslateViewBody(strings.TrimSpace(view.Definition), expr.PostgreSQL)
 	body = strings.TrimSuffix(body, ";")
 	keyword := "CREATE VIEW"
 	if view.IsMaterialized {
@@ -790,9 +791,17 @@ func (p *PostgreSQL) parseColumn(def string) (sqlmapper.Column, error) {
 	rest := strings.TrimSpace(def[len(parts[0]):])
 	applyPGType(&column, takeUntilStopWord(rest, pgTypeStopWords))
 
+	// A serial is an integer column with a sequence attached. Recording it as
+	// "bigserial" would leave the shared model holding PostgreSQL's own spelling
+	// for the thing MySQL records as bigint plus AutoIncrement, so the two sides
+	// are folded onto the same representation here.
 	switch column.DataType {
-	case "serial", "bigserial", "smallserial":
-		column.AutoIncrement = true
+	case "serial":
+		column.DataType, column.AutoIncrement = "int", true
+	case "bigserial":
+		column.DataType, column.AutoIncrement = "bigint", true
+	case "smallserial":
+		column.DataType, column.AutoIncrement = "smallint", true
 	}
 
 	// NOT NULL
@@ -1136,7 +1145,7 @@ func (p *PostgreSQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmappe
 			// CHECK (json_valid(col)). The column maps to a native jsonb here,
 			// which validates itself, and PostgreSQL has no json_valid function,
 			// so carrying the check over would only break the load.
-			if sqlmapper.IsJSONEmulationCheck(c.CheckExpression) {
+			if expr.IsJSONGuardSQL(c.CheckExpression) {
 				continue
 			}
 			tableConstraints = append(tableConstraints, c)
@@ -1231,8 +1240,9 @@ func (p *PostgreSQL) generateColumnSQL(col sqlmapper.Column, tableName string, i
 				dv = "false"
 			}
 		}
-		if strings.ToUpper(dv) == "CURRENT_TIMESTAMP" || dv == "true" || dv == "false" ||
-			strings.ContainsAny(dv, "()") {
+		if strings.ContainsAny(dv, "()") {
+			parts = append(parts, "DEFAULT", expr.Value(dv, expr.PostgreSQL))
+		} else if strings.ToUpper(dv) == "CURRENT_TIMESTAMP" || dv == "true" || dv == "false" {
 			parts = append(parts, "DEFAULT", dv)
 		} else if isNumeric(dv) {
 			parts = append(parts, "DEFAULT", dv)
@@ -1332,7 +1342,7 @@ func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 	case "UNIQUE":
 		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", c.CheckExpression))
+		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.PostgreSQL)))
 	}
 	return sb.String()
 }
@@ -1380,17 +1390,6 @@ func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
 		}
 	}
 	return false
-}
-
-// pgForeignSchemaRe matches the default schema qualifier of the other dialects.
-// Only those two names are stripped: a general schema.table rewrite would also
-// eat legitimate alias.column references inside a view body.
-var pgForeignSchemaRe = regexp.MustCompile(`(?i)\b(?:dbo|public)\.`)
-
-// stripForeignDefaultSchema removes a dbo. or public. qualifier carried over
-// from the source dialect, neither of which resolves here.
-func stripForeignDefaultSchema(expr string) string {
-	return strings.TrimSpace(pgForeignSchemaRe.ReplaceAllString(expr, ""))
 }
 
 // stripSchemaPrefix reduces "schema.table" to "table". Schema qualification does

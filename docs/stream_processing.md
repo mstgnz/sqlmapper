@@ -4,12 +4,12 @@ The stream parsers read a dump statement by statement and hand each schema objec
 
 ## Constructors
 
-| Dialect | Constructor |
-| --- | --- |
-| MySQL | `mysql.NewMySQLStreamParser()` |
+| Dialect    | Constructor                            |
+| ---------- | -------------------------------------- |
+| MySQL      | `mysql.NewMySQLStreamParser()`         |
 | PostgreSQL | `postgres.NewPostgreSQLStreamParser()` |
-| SQLite | `sqlite.NewSQLiteStreamParser()` |
-| Oracle | `oracle.NewOracleStreamParser()` |
+| SQLite     | `sqlite.NewSQLiteStreamParser()`       |
+| Oracle     | `oracle.NewOracleStreamParser()`       |
 | SQL Server | `sqlserver.NewSQLServerStreamParser()` |
 
 All of them satisfy `stream.StreamParser`:
@@ -105,11 +105,11 @@ err = postgres.NewPostgreSQLStreamParser().GenerateStream(schema, out)
 
 Each dialect uses the delimiter its own dumps use, which matters when you build a fixture by hand:
 
-| Dialect | Delimiter |
-| --- | --- |
-| MySQL, PostgreSQL, SQLite | `;` |
-| Oracle | `/` on its own line |
-| SQL Server | `GO` |
+| Dialect                   | Delimiter           |
+| ------------------------- | ------------------- |
+| MySQL, PostgreSQL, SQLite | `;`                 |
+| Oracle                    | `/` on its own line |
+| SQL Server                | `GO`                |
 
 `CREATE OR REPLACE` is understood everywhere it is legal; the optional keywords are folded away before the statement is classified.
 

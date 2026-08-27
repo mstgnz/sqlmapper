@@ -1,9 +1,11 @@
 # SQLMapper API Documentation
 
 ## Overview
+
 SQLMapper provides a comprehensive API for converting SQL schemas between different database systems. This document outlines the main components and their usage.
 
 ## Table of Contents
+
 - [Parser API](#parser-api)
 - [Converter API](#converter-api)
 - [Schema API](#schema-api)
@@ -182,7 +184,7 @@ import (
 
 func main() {
     parser := mysql.NewMySQL()
-    
+
     // Parse complex schema
     schema, err := parser.Parse(complexSQL)
     if err != nil {
