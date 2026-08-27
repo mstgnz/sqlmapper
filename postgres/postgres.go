@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
@@ -340,19 +341,19 @@ func (p *PostgreSQL) parseSequences(content string) error {
 
 		opts := m[2]
 		if o := pgSeqIncrementRe.FindStringSubmatch(opts); len(o) > 1 {
-			fmt.Sscanf(o[1], "%d", &seq.IncrementBy)
+			seq.IncrementBy = atoi(o[1])
 		}
 		if o := pgSeqMinRe.FindStringSubmatch(opts); len(o) > 1 {
-			fmt.Sscanf(o[1], "%d", &seq.MinValue)
+			seq.MinValue = atoi(o[1])
 		}
 		if o := pgSeqMaxRe.FindStringSubmatch(opts); len(o) > 1 {
-			fmt.Sscanf(o[1], "%d", &seq.MaxValue)
+			seq.MaxValue = atoi(o[1])
 		}
 		if o := pgSeqStartRe.FindStringSubmatch(opts); len(o) > 1 {
-			fmt.Sscanf(o[1], "%d", &seq.StartValue)
+			seq.StartValue = atoi(o[1])
 		}
 		if o := pgSeqCacheRe.FindStringSubmatch(opts); len(o) > 1 {
-			fmt.Sscanf(o[1], "%d", &seq.Cache)
+			seq.Cache = atoi(o[1])
 		}
 		if pgSeqCycleRe.MatchString(opts) && !pgSeqNoCycleRe.MatchString(opts) {
 			seq.Cycle = true
@@ -762,9 +763,9 @@ func applyPGType(column *sqlmapper.Column, typeExpr string) {
 
 	if m := pgTypeWithLenRe.FindStringSubmatch(typeExpr); len(m) > 2 {
 		column.DataType = normalizePGTypeName(m[1])
-		fmt.Sscanf(m[2], "%d", &column.Length)
+		column.Length = atoi(m[2])
 		if len(m) > 3 && m[3] != "" {
-			fmt.Sscanf(m[3], "%d", &column.Scale)
+			column.Scale = atoi(m[3])
 		}
 		return
 	}
@@ -1434,4 +1435,12 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// atoi reads a base-10 integer out of a string that a pattern has already
+// matched as digits. Nothing malformed can reach here, and zero is the right
+// answer if anything ever does.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

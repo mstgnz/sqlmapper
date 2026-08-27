@@ -103,7 +103,7 @@ func StreamExample() {
 	if err != nil {
 		log.Fatalf("Failed to open file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Parse stream and handle objects
 	err = parser.ParseStream(file, func(obj stream.SchemaObject) error {

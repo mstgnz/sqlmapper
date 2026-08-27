@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
@@ -431,9 +432,9 @@ func (s *SQLite) parseTables(statement string) error {
 				re := regexp.MustCompile(`(\w+)\((\d+)(?:,(\d+))?\)`)
 				if matches := re.FindStringSubmatch(column.DataType); len(matches) > 2 {
 					column.DataType = matches[1]
-					fmt.Sscanf(matches[2], "%d", &column.Length)
+					column.Length = atoi(matches[2])
 					if len(matches) > 3 && matches[3] != "" {
-						fmt.Sscanf(matches[3], "%d", &column.Scale)
+						column.Scale = atoi(matches[3])
 					}
 				}
 			}
@@ -661,4 +662,12 @@ func splitTopLevelCommas(body []byte) [][]byte {
 		parts = append(parts, body[start:])
 	}
 	return parts
+}
+
+// atoi reads a base-10 integer out of a string that a pattern has already
+// matched as digits. Nothing malformed can reach here, and zero is the right
+// answer if anything ever does.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

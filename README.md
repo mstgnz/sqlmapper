@@ -1,5 +1,10 @@
 # SQLMapper
 
+[![CI](https://github.com/mstgnz/sqlmapper/actions/workflows/ci.yml/badge.svg)](https://github.com/mstgnz/sqlmapper/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mstgnz/sqlmapper.svg)](https://pkg.go.dev/github.com/mstgnz/sqlmapper)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mstgnz/sqlmapper)](https://goreportcard.com/report/github.com/mstgnz/sqlmapper)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 Convert a SQL schema from one database dialect to another, as a Go library or a CLI.
 
 SQLMapper reads a dump file, parses the DDL into a dialect-neutral schema, and writes that schema back out as SQL for a different database. It never connects to a database, which makes it usable in CI, in a build step, or on a dump someone emailed you. No runtime dependencies: the only module requirement is testify, and that is test-only.
@@ -200,15 +205,28 @@ fidelity for a schema that actually loads:
 ## Development
 
 ```bash
-go test ./...          # unit and integration tests
-go test -race ./...    # the stream parsers are exercised concurrently
-go test -cover ./...   # every package is kept above 85%
-go run ./examples      # end-to-end conversions over the sample dumps
+go test ./...            # unit and integration tests
+go test -race ./...      # the stream parsers are exercised concurrently
+go test -cover ./...     # every package is kept above 85%
+go run ./examples        # end-to-end conversions over the sample dumps
+golangci-lint run ./...  # the check set is pinned in .golangci.yml
 ```
+
+CI runs all of the above, plus `gofmt` and `go vet`, on every push and pull
+request. The linter version is pinned so a new release cannot turn a pull
+request red on its own.
 
 ## Contributing
 
-Issues and pull requests are welcome. If you hit a dump that converts wrongly, the most useful bug report is the smallest fragment of SQL that reproduces it plus what you expected to come out.
+Issues and pull requests are welcome. If you hit a dump that converts wrongly,
+the most useful bug report is the smallest fragment of SQL that reproduces it,
+which dialect and version produced it, and what you expected to come out.
+
+The dialects with the least coverage are SQLite, Oracle and SQL Server, and the
+gaps there are worth more than polish elsewhere. Every fix in this repository
+carries a regression test built from real dump tool output rather than
+hand-shaped SQL; see `tests/integration` and the `*_real_ddl_test.go` files for
+the shape to follow.
 
 ## License
 

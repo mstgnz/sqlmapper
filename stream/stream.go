@@ -204,30 +204,43 @@ func (sr *StreamReader) ReadStatement() (string, error) {
 		// Handle comments
 		if !inString && !inComment && b == '-' {
 			nextByte, err := sr.reader.ReadByte()
-			if err == nil && nextByte == '-' {
-				lineComment = true
-				inComment = true
-				continue
+			if err == nil {
+				if nextByte == '-' {
+					lineComment = true
+					inComment = true
+					continue
+				}
+				// Only a byte that was actually read can be pushed back.
+				if err := sr.reader.UnreadByte(); err != nil {
+					return "", err
+				}
 			}
-			sr.reader.UnreadByte()
 		}
 
 		if !inString && !inComment && b == '/' {
 			nextByte, err := sr.reader.ReadByte()
-			if err == nil && nextByte == '*' {
-				inComment = true
-				continue
+			if err == nil {
+				if nextByte == '*' {
+					inComment = true
+					continue
+				}
+				if err := sr.reader.UnreadByte(); err != nil {
+					return "", err
+				}
 			}
-			sr.reader.UnreadByte()
 		}
 
 		if inComment && !lineComment && b == '*' {
 			nextByte, err := sr.reader.ReadByte()
-			if err == nil && nextByte == '/' {
-				inComment = false
-				continue
+			if err == nil {
+				if nextByte == '/' {
+					inComment = false
+					continue
+				}
+				if err := sr.reader.UnreadByte(); err != nil {
+					return "", err
+				}
 			}
-			sr.reader.UnreadByte()
 		}
 
 		if lineComment && b == '\n' {

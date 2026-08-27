@@ -1,0 +1,27 @@
+version: "2"
+
+# The linter set is listed explicitly rather than left at the default. CI runs a
+# pinned version, and pinning the checks alongside it means a linter release
+# cannot turn a contributor's pull request red without anyone changing any code.
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    staticcheck:
+      # SA (correctness) and S (simplification) are worth gating a build on.
+      # QF and ST are stylistic quick fixes: they rewrite working code without
+      # changing what it does, so they are left to the author's judgement.
+      checks:
+        - all
+        - -QF*
+        - -ST*
+
+formatters:
+  enable:
+    - gofmt

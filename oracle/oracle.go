@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
@@ -124,9 +125,9 @@ func applyOracleType(col *sqlmapper.Column, typeExpr string) {
 	typeExpr = oracleSpaceBeforeParenRe.ReplaceAllString(strings.TrimSpace(typeExpr), "(")
 
 	if m := oracleTypeWithLenRe.FindStringSubmatch(typeExpr); len(m) > 2 {
-		fmt.Sscanf(m[2], "%d", &col.Length)
+		col.Length = atoi(m[2])
 		if m[3] != "" {
-			fmt.Sscanf(m[3], "%d", &col.Scale)
+			col.Scale = atoi(m[3])
 		}
 		col.DataType = normalizeOracleTypeName(m[1], col.Scale)
 
@@ -544,7 +545,7 @@ func (o *Oracle) parseCreateSequence(stmt string) (sqlmapper.Sequence, error) {
 	readInt := func(pattern string, target *int) {
 		m := regexp.MustCompile(pattern).FindStringSubmatch(stmt)
 		if len(m) > 1 {
-			fmt.Sscanf(m[1], "%d", target)
+			*target = atoi(m[1])
 		}
 	}
 
@@ -689,8 +690,8 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Create sequences
 	for _, seq := range schema.Sequences {
-		result.WriteString(fmt.Sprintf("CREATE SEQUENCE %s START WITH %d INCREMENT BY %d;\n\n",
-			seq.Name, seq.StartValue, seq.IncrementBy))
+		fmt.Fprintf(&result, "CREATE SEQUENCE %s START WITH %d INCREMENT BY %d;\n\n",
+			seq.Name, seq.StartValue, seq.IncrementBy)
 	}
 
 	// Dump tools do not order tables by dependency, so a child table can precede
@@ -714,14 +715,14 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 	// are added once every table exists.
 	for _, table := range tables {
 		for _, c := range deferredFKs[table.Name] {
-			result.WriteString(fmt.Sprintf("ALTER TABLE %s ADD %s;\n\n", table.Name, o.generateConstraintSQL(c)))
+			fmt.Fprintf(&result, "ALTER TABLE %s ADD %s;\n\n", table.Name, o.generateConstraintSQL(c))
 		}
 	}
 
 	// Create views
 	for _, view := range schema.Views {
-		result.WriteString(fmt.Sprintf("CREATE OR REPLACE VIEW %s AS\n%s;\n\n",
-			view.Name, toOracleExpression(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"))))
+		fmt.Fprintf(&result, "CREATE OR REPLACE VIEW %s AS\n%s;\n\n",
+			view.Name, toOracleExpression(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";")))
 	}
 
 	// Create triggers
@@ -796,9 +797,9 @@ func (o *Oracle) parseTables(statement string) error {
 				re := regexp.MustCompile(`(\w+)\((\d+)(?:,(\d+))?\)`)
 				if matches := re.FindStringSubmatch(column.DataType); len(matches) > 2 {
 					column.DataType = matches[1]
-					fmt.Sscanf(matches[2], "%d", &column.Length)
+					column.Length = atoi(matches[2])
 					if len(matches) > 3 && matches[3] != "" {
-						fmt.Sscanf(matches[3], "%d", &column.Scale)
+						column.Scale = atoi(matches[3])
 					}
 				}
 			}
@@ -948,19 +949,19 @@ func (o *Oracle) parseSequences(statement string) error {
 
 		// Parse optional parameters
 		if len(matches) > 2 && matches[2] != "" {
-			fmt.Sscanf(matches[2], "%d", &seq.StartValue)
+			seq.StartValue = atoi(matches[2])
 		}
 		if len(matches) > 3 && matches[3] != "" {
-			fmt.Sscanf(matches[3], "%d", &seq.IncrementBy)
+			seq.IncrementBy = atoi(matches[3])
 		}
 		if len(matches) > 4 && matches[4] != "" {
-			fmt.Sscanf(matches[4], "%d", &seq.MinValue)
+			seq.MinValue = atoi(matches[4])
 		}
 		if len(matches) > 5 && matches[5] != "" {
-			fmt.Sscanf(matches[5], "%d", &seq.MaxValue)
+			seq.MaxValue = atoi(matches[5])
 		}
 		if len(matches) > 6 && matches[6] != "" {
-			fmt.Sscanf(matches[6], "%d", &seq.Cache)
+			seq.Cache = atoi(matches[6])
 		}
 		seq.Cycle = strings.Contains(statement, "CYCLE")
 
@@ -1383,4 +1384,12 @@ func splitTopLevelCommas(body string) []string {
 		parts = append(parts, body[start:])
 	}
 	return parts
+}
+
+// atoi reads a base-10 integer out of a string that a pattern has already
+// matched as digits. Nothing malformed can reach here, and zero is the right
+// answer if anything ever does.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

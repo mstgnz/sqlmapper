@@ -48,10 +48,13 @@ jobs:
       - name: Run the examples end to end
         run: go run ./examples
 
+      # Pinned on purpose. With "latest" a new linter release can turn a
+      # contributor's pull request red without anyone changing any code.
+      # The check set is pinned alongside it in .golangci.yml.
       - name: Run linter
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.13.1
 
   build:
     name: Build

@@ -289,8 +289,14 @@ func TestRunErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected an error, stderr: %s", stderr.String())
 			}
-			if !strings.Contains(stderr.String(), tt.want) {
-				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tt.want)
+			// Usage goes to stderr because the flag set writes it; everything
+			// else is returned so main can print it exactly once.
+			got := err.Error()
+			if tt.want == "Usage:" {
+				got = stderr.String()
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("got %q, want it to contain %q", got, tt.want)
 			}
 		})
 	}

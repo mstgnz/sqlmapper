@@ -152,13 +152,16 @@ func TestWorkerPool(t *testing.T) {
 					parseStreamFunc: func(reader io.Reader, callback func(SchemaObject) error) error {
 						// Simulate parsing by creating mock objects
 						buf := new(bytes.Buffer)
-						buf.ReadFrom(reader)
+						if _, err := buf.ReadFrom(reader); err != nil {
+							return err
+						}
 						stmt := strings.TrimSpace(buf.String())
 
 						if strings.Contains(stmt, "users") {
-							callback(SchemaObject{Type: TableObject, Data: "users"})
-						} else if strings.Contains(stmt, "posts") {
-							callback(SchemaObject{Type: TableObject, Data: "posts"})
+							return callback(SchemaObject{Type: TableObject, Data: "users"})
+						}
+						if strings.Contains(stmt, "posts") {
+							return callback(SchemaObject{Type: TableObject, Data: "posts"})
 						}
 						return nil
 					},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
@@ -545,9 +546,9 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 		rawType := parts[1]
 		if typeMatch := mysqlTypeWithLenRe.FindStringSubmatch(rawType); len(typeMatch) > 2 {
 			column.DataType = strings.ToLower(typeMatch[1])
-			fmt.Sscanf(typeMatch[2], "%d", &column.Length)
+			column.Length = atoi(typeMatch[2])
 			if len(typeMatch) > 3 && typeMatch[3] != "" {
-				fmt.Sscanf(typeMatch[3], "%d", &column.Scale)
+				column.Scale = atoi(typeMatch[3])
 			}
 		} else {
 			column.DataType = strings.ToLower(rawType)
@@ -1097,4 +1098,12 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// atoi reads a base-10 integer out of a string that a pattern has already
+// matched as digits. Nothing malformed can reach here, and zero is the right
+// answer if anything ever does.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

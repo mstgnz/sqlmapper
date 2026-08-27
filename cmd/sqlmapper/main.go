@@ -28,15 +28,29 @@ import (
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if !errors.Is(err, errUsage) && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }
+
+// errUsage marks the case where the usage text has already been written, so
+// main does not print a second message on top of it.
+var errUsage = errors.New("missing required flags")
 
 // run holds everything main does, with its inputs and outputs passed in so the
 // conversion can be exercised without spawning a process.
 func run(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("sqlmapper", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		// Nothing useful can be done if writing the usage text fails, which is
+		// also why flag.PrintDefaults below discards its own error.
+		_, _ = fmt.Fprintln(stderr, "Usage: sqlmapper --file=<path> --to=<target_db> [--from=<source_db>] [--out=<path>]")
+		_, _ = fmt.Fprintln(stderr, "Example: sqlmapper --file=postgres.sql --to=mysql")
+		fs.PrintDefaults()
+	}
 
 	filePath := fs.String("file", "", "path to the SQL dump file")
 	sourceDB := fs.String("from", "", "source database type; detected from the dump when omitted")
@@ -48,52 +62,41 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if *filePath == "" || *targetDB == "" {
-		fmt.Fprintln(stderr, "Usage: sqlmapper --file=<path> --to=<target_db> [--from=<source_db>] [--out=<path>]")
-		fmt.Fprintln(stderr, "Example: sqlmapper --file=postgres.sql --to=mysql")
-		fs.PrintDefaults()
-		return errors.New("missing required flags")
+		fs.Usage()
+		return errUsage
 	}
 
 	content, err := os.ReadFile(*filePath)
 	if err != nil {
-		fmt.Fprintf(stderr, "cannot read input file: %v\n", err)
-		return err
+		return fmt.Errorf("cannot read input file: %w", err)
 	}
 
 	sourceType := strings.ToLower(strings.TrimSpace(*sourceDB))
 	if sourceType == "" {
 		sourceType = detectSourceType(string(content))
 		if sourceType == "" {
-			err := errors.New("could not detect the source database type; pass --from explicitly")
-			fmt.Fprintln(stderr, err)
-			return err
+			return errors.New("could not detect the source database type; pass --from explicitly")
 		}
 	}
 
 	sourceParser := createParser(sourceType)
 	if sourceParser == nil {
-		err := fmt.Errorf("unsupported source database type: %s", sourceType)
-		fmt.Fprintln(stderr, err)
-		return err
+		return fmt.Errorf("unsupported source database type: %s", sourceType)
 	}
 
 	targetParser := createParser(*targetDB)
 	if targetParser == nil {
-		err := fmt.Errorf("unsupported target database type: %s", *targetDB)
-		fmt.Fprintln(stderr, err)
-		return err
+		return fmt.Errorf("unsupported target database type: %s", *targetDB)
 	}
 
 	schema, err := sourceParser.Parse(string(content))
 	if err != nil {
-		fmt.Fprintf(stderr, "parse error: %v\n", err)
-		return err
+		return fmt.Errorf("parse error: %w", err)
 	}
 
 	result, err := targetParser.Generate(schema)
 	if err != nil {
-		fmt.Fprintf(stderr, "generate error: %v\n", err)
-		return err
+		return fmt.Errorf("generate error: %w", err)
 	}
 
 	outputPath := *outPath
@@ -101,12 +104,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		outputPath = createOutputPath(*filePath, *targetDB)
 	}
 	if err := os.WriteFile(outputPath, []byte(result), 0644); err != nil {
-		fmt.Fprintf(stderr, "cannot write output file: %v\n", err)
-		return err
+		return fmt.Errorf("cannot write output file: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Converted %s (%s) to %s: %s\n", *filePath, sourceType, *targetDB, outputPath)
-	return nil
+	_, err = fmt.Fprintf(stdout, "Converted %s (%s) to %s: %s\n", *filePath, sourceType, *targetDB, outputPath)
+	return err
 }
 
 // dialectMarkers lists the substrings that identify each dialect in a dump.

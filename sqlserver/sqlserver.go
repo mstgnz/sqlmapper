@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
@@ -27,7 +28,6 @@ var (
 	mssOnFilegroupRe = regexp.MustCompile(`(?i)\)\s*(?:TEXTIMAGE_)?ON\s+\[[^\]]+\]`)
 	mssSortOrderRe   = regexp.MustCompile(`(?i)(\]|\w)\s+(?:ASC|DESC)\b`)
 	mssWithCheckRe   = regexp.MustCompile(`(?i)\s+WITH\s+(?:NO)?CHECK\b`)
-	mssClusteredRe   = regexp.MustCompile(`(?i)\s+(?:NON)?CLUSTERED\b`)
 	mssIdentityRe    = regexp.MustCompile(`(?i)\s*IDENTITY\s*(?:\(\s*-?\d+\s*,\s*-?\d+\s*\))?`)
 	mssTypeParenRe   = regexp.MustCompile(`\(\s*(\d+|MAX|max)\s*(?:,\s*(\d+)\s*)?\)`)
 	mssWhitespaceRe  = regexp.MustCompile(`\s+`)
@@ -663,9 +663,9 @@ func (s *SQLServer) parseColumn(def []byte) sqlmapper.Column {
 		base := unbracketIdent(mssTypeParenRe.ReplaceAllString(typeExpr, ""))
 		column.DataType = normalizeSQLServerTypeName(base)
 		if !strings.EqualFold(m[1], "MAX") {
-			fmt.Sscanf(m[1], "%d", &column.Length)
+			column.Length = atoi(m[1])
 			if len(m) > 2 && m[2] != "" {
-				fmt.Sscanf(m[2], "%d", &column.Scale)
+				column.Scale = atoi(m[2])
 			}
 			switch column.DataType {
 			case "timestamp", "timestamp with time zone", "time":
@@ -1126,10 +1126,10 @@ func (s *SQLServer) parseTables(statement string) error {
 					if matches[2] == "MAX" {
 						column.Length = -1
 					} else {
-						fmt.Sscanf(matches[2], "%d", &column.Length)
+						column.Length = atoi(matches[2])
 					}
 					if len(matches) > 3 && matches[3] != "" {
-						fmt.Sscanf(matches[3], "%d", &column.Scale)
+						column.Scale = atoi(matches[3])
 					}
 				}
 			}
@@ -1328,4 +1328,12 @@ func stripSQLComments(content string) string {
 		}
 	}
 	return out.String()
+}
+
+// atoi reads a base-10 integer out of a string that a pattern has already
+// matched as digits. Nothing malformed can reach here, and zero is the right
+// answer if anything ever does.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }
