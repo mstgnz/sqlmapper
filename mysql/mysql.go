@@ -278,7 +278,16 @@ func (m *MySQL) Parse(content string) (*sqlmapper.Schema, error) {
 // splitStatements cuts normalised content into statements for the ALTER replay.
 // The splitter is used rather than a plain Split on the semicolon because a
 // routine body carries semicolons of its own.
+//
+// This walk is most of what the replay costs, so a file holding nothing it
+// could act on skips it. mysqldump writes no ALTER at all, and paying for a
+// full second pass over a large dump to find none of them was the whole of the
+// slowdown the replay introduced.
 func splitStatements(content string) []string {
+	if !alter.MightApply(content) {
+		return nil
+	}
+
 	var out []string
 	splitter := sqlsplit.New(strings.NewReader(content), ";")
 	for {

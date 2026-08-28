@@ -371,3 +371,32 @@ func TestOrdinaryBlockCommentIsStillDropped(t *testing.T) {
 	assert.NotContains(t, got[0], "dropped")
 	assert.Contains(t, got[0], "CREATE TABLE users")
 }
+
+// TestRoutineStartIsReadFromTheHead pins the bound the routine test reads.
+//
+// The pattern is anchored at the start, so only the head of a statement can
+// change the answer, and reading the whole buffer instead rescanned every
+// buffered statement on every terminator. The bound has to be generous enough
+// for the longest real header, which is a MySQL routine carrying DEFINER,
+// ALGORITHM and SQL SECURITY before the object keyword.
+func TestRoutineStartIsReadFromTheHead(t *testing.T) {
+	long := "CREATE DEFINER=`" + strings.Repeat("u", 120) + "`@`" +
+		strings.Repeat("h", 120) + "` SQL SECURITY DEFINER PROCEDURE p() " +
+		"BEGIN SELECT 1; SELECT 2; END"
+
+	got := all(t, long+";\nCREATE TABLE t (id INT);", Semicolon)
+	if len(got) != 2 {
+		t.Fatalf("a long routine header was cut at an inner semicolon: %d statements\n%q", len(got), got)
+	}
+	if !strings.Contains(got[0], "SELECT 2") {
+		t.Errorf("the body was truncated: %q", got[0])
+	}
+
+	// The bound has to clear the longest header by a wide margin, since a
+	// statement past it stops looking like a routine and its body would be cut
+	// at the first inner semicolon.
+	if len(long)-len("BEGIN SELECT 1; SELECT 2; END") >= routineStartBound {
+		t.Errorf("the longest real header is %d bytes and the bound is %d",
+			len(long), routineStartBound)
+	}
+}

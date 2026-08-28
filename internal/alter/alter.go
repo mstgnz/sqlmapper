@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 )
 
@@ -140,12 +141,19 @@ func Parse(stmt string) (Statement, bool) {
 		return Statement{}, false
 	}
 
-	if m := spRenameRe.FindStringSubmatch(stmt); m != nil {
-		return fromSpRename(m)
+	// The cheap check first. A schema file is mostly CREATE, and this runs once
+	// per statement in the file: uppercasing every CREATE TABLE body to read its
+	// first word, and running a regex over it, doubled the time to parse a
+	// five-hundred table dump.
+	if !keyword.HasPrefix(stmt, "ALTER") {
+		if keyword.HasPrefix(stmt, "EXEC") || keyword.HasPrefix(stmt, "EXECUTE") {
+			if m := spRenameRe.FindStringSubmatch(stmt); m != nil {
+				return fromSpRename(m)
+			}
+		}
+		return Statement{}, false
 	}
-
-	upper := strings.ToUpper(stmt)
-	if !strings.HasPrefix(strings.TrimSpace(upper), "ALTER TABLE") {
+	if !keyword.HasPrefix(stmt, "ALTER TABLE") {
 		return Statement{}, false
 	}
 
@@ -274,4 +282,20 @@ func names(body string) []string {
 		}
 	}
 	return out
+}
+
+// mightApplyRe is the cheap gate in front of the replay: the keywords that
+// could start a statement this package acts on.
+var mightApplyRe = regexp.MustCompile(`(?i)\b(?:ALTER|SP_RENAME)\b`)
+
+// MightApply reports whether content holds anything the replay could act on.
+//
+// The whole-file parsers that do not already split their input have to split it
+// a second time to find the ALTER statements, and that walk is most of what the
+// replay costs. A dump with no ALTER in it at all, which is what mysqldump
+// writes, pays one scan instead. The test is deliberately loose: a match inside
+// a comment or a string costs a split that finds nothing, and a miss would lose
+// a statement.
+func MightApply(content string) bool {
+	return mightApplyRe.MatchString(content)
 }

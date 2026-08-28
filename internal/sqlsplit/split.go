@@ -267,8 +267,22 @@ func (s *Splitter) next() (string, error) {
 // SQL Server writes GO, MySQL changes the delimiter, PostgreSQL wraps the body
 // in dollar quotes. SQLite has none of those, and marks the end with END, so
 // that is what closes one here.
+// routineStartBound caps how much of a statement the routine test reads.
+//
+// The pattern is anchored at the start, so nothing past its longest possible
+// match can change the answer, and the longest is a CREATE carrying OR ALTER,
+// OR REPLACE, DEFINER, ALGORITHM, SQL SECURITY and NONEDITIONABLE before the
+// object keyword. Reading the whole buffer instead rescanned every buffered
+// statement on every terminator, which is most of what it cost to split a large
+// dump.
+const routineStartBound = 512
+
 func (s *Splitter) terminatorApplies() bool {
-	if !routineStart.MatchString(s.buf.String()) {
+	head := s.buf.String()
+	if len(head) > routineStartBound {
+		head = head[:routineStartBound]
+	}
+	if !routineStart.MatchString(head) {
 		return true
 	}
 	if s.mode != Semicolon {
