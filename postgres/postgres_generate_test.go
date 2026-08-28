@@ -175,11 +175,11 @@ func TestGenerateViewSQL(t *testing.T) {
 	p := &PostgreSQL{}
 
 	assert.Equal(t, "CREATE VIEW v AS SELECT 1;",
-		p.generateViewSQL(sqlmapper.View{Name: "v", Definition: "SELECT 1"}))
+		p.generateViewSQL(sqlmapper.View{Name: "v", Definition: "SELECT 1"}, nil))
 	assert.Equal(t, "CREATE VIEW v AS SELECT 1;",
-		p.generateViewSQL(sqlmapper.View{Name: "v", Definition: "SELECT 1;"}))
+		p.generateViewSQL(sqlmapper.View{Name: "v", Definition: "SELECT 1;"}, nil))
 	assert.Equal(t, "CREATE MATERIALIZED VIEW mv AS SELECT 1;",
-		p.generateViewSQL(sqlmapper.View{Name: "mv", Definition: "SELECT 1", IsMaterialized: true}))
+		p.generateViewSQL(sqlmapper.View{Name: "mv", Definition: "SELECT 1", IsMaterialized: true}, nil))
 }
 
 func TestGenerateTypeSQL(t *testing.T) {

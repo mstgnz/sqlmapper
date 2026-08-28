@@ -268,7 +268,7 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		if len(table.Indexes) > 0 {
 			result.WriteString("\n")
 			for _, index := range table.Indexes {
-				result.WriteString(m.generateIndexSQL(table.Name, index))
+				result.WriteString(m.generateIndexSQL(table.Name, index, columnsByName(table)))
 				result.WriteString("\n")
 			}
 		}
@@ -278,7 +278,7 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// are added once every table exists.
 	for _, table := range tables {
 		for _, c := range deferredFKs[table.Name] {
-			result.WriteString(fmt.Sprintf("\nALTER TABLE %s ADD %s;\n", table.Name, m.generateConstraintSQL(c)))
+			result.WriteString(fmt.Sprintf("\nALTER TABLE %s ADD %s;\n", table.Name, m.generateConstraintSQL(c, columnsByName(table))))
 		}
 	}
 
@@ -937,7 +937,7 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 	}
 
 	for i, c := range tableConstraints {
-		result.WriteString("    " + m.generateConstraintSQL(c))
+		result.WriteString("    " + m.generateConstraintSQL(c, columnsByName(table)))
 		if len(table.Columns)+i < totalItems-1 {
 			result.WriteString(",")
 		}
@@ -1081,14 +1081,14 @@ func (m *MySQL) resolveType(col sqlmapper.Column) string {
 	return strings.ToUpper(col.DataType)
 }
 
-func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint) string {
+func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint, cols map[string]sqlmapper.Column) string {
 	var sb strings.Builder
 	if c.Name != "" {
 		sb.WriteString(fmt.Sprintf("CONSTRAINT %s ", c.Name))
 	}
 	switch c.Type {
 	case "PRIMARY KEY":
-		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", m.mysqlKeyColumns(c.Columns, cols)))
 	case "FOREIGN KEY":
 		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
@@ -1099,22 +1099,69 @@ func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 			sb.WriteString(" ON UPDATE " + c.UpdateRule)
 		}
 	case "UNIQUE":
-		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", m.mysqlKeyColumns(c.Columns, cols)))
 	case "CHECK":
 		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.MySQL)))
 	}
 	return sb.String()
 }
 
-func (m *MySQL) generateIndexSQL(tableName string, index sqlmapper.Index) string {
+func (m *MySQL) generateIndexSQL(tableName string, index sqlmapper.Index, cols map[string]sqlmapper.Column) string {
 	var sb strings.Builder
 	if index.IsUnique {
 		sb.WriteString("CREATE UNIQUE INDEX ")
 	} else {
 		sb.WriteString("CREATE INDEX ")
 	}
-	sb.WriteString(fmt.Sprintf("%s ON %s(%s);", index.Name, tableName, strings.Join(index.Columns, ", ")))
+	sb.WriteString(fmt.Sprintf("%s ON %s(%s);", index.Name, tableName, m.mysqlKeyColumns(index.Columns, cols)))
 	return sb.String()
+}
+
+// mysqlTextKeyPrefix is how much of an unbounded column a key covers.
+//
+// MySQL refuses to index a TEXT or BLOB column without one, and a source that
+// has no length to give, such as SQLite, produces exactly that: "BLOB/TEXT
+// column 'email' used in key specification without a key length". 255 is the
+// conventional choice, and at four bytes per character it stays inside the
+// 3072-byte limit an InnoDB index has.
+const mysqlTextKeyPrefix = 255
+
+// unboundedKeyTypes are the MySQL types that carry no length of their own.
+var unboundedKeyTypes = map[string]bool{
+	"tinytext": true, "text": true, "mediumtext": true, "longtext": true,
+	"tinyblob": true, "blob": true, "mediumblob": true, "longblob": true,
+}
+
+// mysqlKeyColumns renders a key's column list, adding the prefix length MySQL
+// requires on a column that has no length of its own.
+func (m *MySQL) mysqlKeyColumns(columns []string, cols map[string]sqlmapper.Column) string {
+	parts := make([]string, 0, len(columns))
+	for _, name := range columns {
+		col, ok := cols[name]
+		if ok && col.Length == 0 && unboundedKeyTypes[mysqlBaseType(m.resolveType(col))] {
+			parts = append(parts, fmt.Sprintf("%s(%d)", name, mysqlTextKeyPrefix))
+			continue
+		}
+		parts = append(parts, name)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mysqlBaseType strips any length off a rendered type, leaving the name.
+func mysqlBaseType(rendered string) string {
+	if i := strings.IndexByte(rendered, '('); i != -1 {
+		rendered = rendered[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(rendered))
+}
+
+// columnsByName indexes a table's columns so a key can look up what it covers.
+func columnsByName(table sqlmapper.Table) map[string]sqlmapper.Column {
+	out := make(map[string]sqlmapper.Column, len(table.Columns))
+	for _, col := range table.Columns {
+		out[col.Name] = col
+	}
+	return out
 }
 
 // splitAndTrim splits a comma-separated string and trims whitespace from each element.

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mstgnz/sqlmapper/internal/expr"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
@@ -85,6 +86,12 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 			if err != nil {
 				return nil, fmt.Errorf("error parsing CREATE TABLE: %v", err)
 			}
+			// sqlite_sequence is SQLite's own bookkeeping for AUTOINCREMENT.
+			// It appears in .schema output, it is not part of anybody's schema,
+			// and the target creates its own equivalent if it needs one.
+			if isSQLiteInternalTable(table.Name) {
+				continue
+			}
 			s.schema.Tables = append(s.schema.Tables, table)
 
 		case bytes.HasPrefix(upperStmt, []byte("CREATE INDEX")) || bytes.HasPrefix(upperStmt, []byte("CREATE UNIQUE INDEX")):
@@ -115,16 +122,17 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 	table := sqlmapper.Table{}
 
-	// Extract table name
-	parts := bytes.Fields(stmt)
-	if len(parts) < 3 {
+	// Extract table name. Reading the third field breaks on the form SQLite's
+	// own .schema writes for its bookkeeping table, CREATE TABLE
+	// sqlite_sequence(name,seq), where the name runs straight into the column
+	// list.
+	m := sqliteTableHeaderRe.FindSubmatch(stmt)
+	if m == nil {
 		return table, fmt.Errorf("invalid CREATE TABLE statement")
 	}
-
-	tableName := string(bytes.Trim(parts[2], "`"))
-	// Remove schema prefix if exists
-	if idx := bytes.LastIndex(parts[2], []byte(".")); idx != -1 {
-		tableName = string(bytes.Trim(parts[2][idx+1:], "`"))
+	tableName := string(bytes.Trim(m[1], "`\"[]"))
+	if idx := strings.LastIndex(tableName, "."); idx != -1 {
+		tableName = tableName[idx+1:]
 	}
 	table.Name = tableName
 
@@ -145,47 +153,176 @@ func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 			continue
 		}
 
-		// Skip if it's a constraint or key definition
-		upperColDef := bytes.ToUpper(colDef)
-		if bytes.HasPrefix(upperColDef, []byte("CONSTRAINT")) ||
-			bytes.HasPrefix(upperColDef, []byte("PRIMARY KEY")) ||
-			bytes.HasPrefix(upperColDef, []byte("FOREIGN KEY")) ||
-			bytes.HasPrefix(upperColDef, []byte("UNIQUE KEY")) ||
-			bytes.HasPrefix(upperColDef, []byte("KEY")) {
+		// A table constraint rather than a column. These used to be skipped and
+		// forgotten, so every primary key, foreign key, unique and check
+		// declared at table level was lost on the way out.
+		if c, ok := parseSQLiteTableConstraint(colDef); ok {
+			table.Constraints = append(table.Constraints, c)
 			continue
 		}
 
-		// Parse column
-		parts := bytes.Fields(colDef)
-		if len(parts) < 2 {
-			continue
+		if column, ok := parseSQLiteColumn(colDef); ok {
+			table.Columns = append(table.Columns, column)
 		}
-
-		column := sqlmapper.Column{
-			Name:     string(bytes.Trim(parts[0], "`")),
-			DataType: string(bytes.ToUpper(parts[1])),
-		}
-
-		// Check for additional properties
-		upperDef := bytes.ToUpper(colDef)
-		column.IsNullable = !bytes.Contains(upperDef, []byte("NOT NULL"))
-		column.AutoIncrement = bytes.Contains(upperDef, []byte("AUTOINCREMENT"))
-
-		if bytes.Contains(upperDef, []byte("DEFAULT")) {
-			if idx := bytes.Index(upperDef, []byte("DEFAULT")); idx != -1 {
-				rest := colDef[idx+7:]
-				if spaceIdx := bytes.Index(rest, []byte(" ")); spaceIdx != -1 {
-					column.DefaultValue = string(bytes.TrimSpace(rest[:spaceIdx]))
-				} else {
-					column.DefaultValue = string(bytes.TrimSpace(rest))
-				}
-			}
-		}
-
-		table.Columns = append(table.Columns, column)
 	}
 
 	return table, nil
+}
+
+// sqliteTableHeaderRe reads the table name, which may run straight into the
+// column list with no space between them.
+var sqliteTableHeaderRe = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `"\[\].\w]+)`)
+
+// sqliteConstraintRe splits an optional CONSTRAINT name off the front of a
+// table constraint.
+var sqliteConstraintRe = regexp.MustCompile(`(?is)^CONSTRAINT\s+([` + "`" + `"\[\]\w]+)\s+(.*)$`)
+
+var (
+	sqlitePKRe     = regexp.MustCompile(`(?is)^PRIMARY\s+KEY\s*\((.*)\)\s*$`)
+	sqliteUniqueRe = regexp.MustCompile(`(?is)^UNIQUE\s*\((.*)\)\s*$`)
+	sqliteCheckRe  = regexp.MustCompile(`(?is)^CHECK\s*\((.*)\)\s*$`)
+	sqliteFKRe     = regexp.MustCompile(`(?is)^FOREIGN\s+KEY\s*\((.*?)\)\s+REFERENCES\s+([` + "`" + `"\[\].\w]+)\s*\((.*?)\)(.*)$`)
+	sqliteOnDelRe  = regexp.MustCompile(`(?is)ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)`)
+	sqliteOnUpdRe  = regexp.MustCompile(`(?is)ON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)`)
+)
+
+// parseSQLiteTableConstraint reads one table-level constraint, reporting false
+// when the definition is a column instead.
+func parseSQLiteTableConstraint(def []byte) (sqlmapper.Constraint, bool) {
+	text := strings.TrimSpace(string(def))
+
+	var c sqlmapper.Constraint
+	if m := sqliteConstraintRe.FindStringSubmatch(text); m != nil {
+		c.Name = strings.Trim(m[1], "`\"[]")
+		text = strings.TrimSpace(m[2])
+	}
+
+	switch {
+	case sqlitePKRe.MatchString(text):
+		c.Type = "PRIMARY KEY"
+		c.Columns = splitAndTrimNames(sqlitePKRe.FindStringSubmatch(text)[1])
+	case sqliteUniqueRe.MatchString(text):
+		c.Type = "UNIQUE"
+		c.Columns = splitAndTrimNames(sqliteUniqueRe.FindStringSubmatch(text)[1])
+	case sqliteCheckRe.MatchString(text):
+		c.Type = "CHECK"
+		c.CheckExpression = strings.TrimSpace(sqliteCheckRe.FindStringSubmatch(text)[1])
+	case sqliteFKRe.MatchString(text):
+		m := sqliteFKRe.FindStringSubmatch(text)
+		c.Type = "FOREIGN KEY"
+		c.Columns = splitAndTrimNames(m[1])
+		c.RefTable = strings.Trim(m[2], "`\"[]")
+		c.RefColumns = splitAndTrimNames(m[3])
+		if r := sqliteOnDelRe.FindStringSubmatch(m[4]); r != nil {
+			c.DeleteRule = strings.ToUpper(strings.Join(strings.Fields(r[1]), " "))
+		}
+		if r := sqliteOnUpdRe.FindStringSubmatch(m[4]); r != nil {
+			c.UpdateRule = strings.ToUpper(strings.Join(strings.Fields(r[1]), " "))
+		}
+	default:
+		return sqlmapper.Constraint{}, false
+	}
+
+	return c, true
+}
+
+// parseSQLiteColumn reads one column definition.
+func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
+	fields := bytes.Fields(def)
+	if len(fields) < 2 {
+		return sqlmapper.Column{}, false
+	}
+
+	upper := bytes.ToUpper(def)
+	column := sqlmapper.Column{
+		Name:          string(bytes.Trim(fields[0], "`\"[]")),
+		DataType:      string(bytes.ToUpper(fields[1])),
+		IsNullable:    !bytes.Contains(upper, []byte("NOT NULL")),
+		AutoIncrement: bytes.Contains(upper, []byte("AUTOINCREMENT")),
+		IsPrimaryKey:  bytes.Contains(upper, []byte("PRIMARY KEY")),
+		IsUnique:      bytes.Contains(upper, []byte("UNIQUE")),
+	}
+
+	// A type may carry its precision, as NUMERIC(10,2) does.
+	if open := bytes.IndexByte(fields[1], '('); open != -1 {
+		column.DataType = string(bytes.ToUpper(fields[1][:open]))
+		inner := fields[1][open+1:]
+		if close := bytes.IndexByte(inner, ')'); close != -1 {
+			nums := strings.Split(string(inner[:close]), ",")
+			column.Length = atoi(strings.TrimSpace(nums[0]))
+			if len(nums) > 1 {
+				column.Scale = atoi(strings.TrimSpace(nums[1]))
+			}
+		}
+	}
+
+	column.DefaultValue = sqliteDefaultValue(def)
+	if m := sqliteCheckRe.FindStringSubmatch(strings.TrimSpace(string(def))); m != nil {
+		column.CheckExpression = strings.TrimSpace(m[1])
+	}
+
+	return column, true
+}
+
+// sqliteDefaultValue reads what follows DEFAULT, which may be a quoted string, a
+// call with its own parentheses, or a bare token.
+//
+// Reading up to the first space returned nothing at all when DEFAULT was the
+// last thing on the line, because the space it found was the one before the
+// value.
+func sqliteDefaultValue(def []byte) string {
+	idx := bytes.Index(bytes.ToUpper(def), []byte("DEFAULT"))
+	if idx == -1 {
+		return ""
+	}
+
+	rest := strings.TrimSpace(string(def[idx+len("DEFAULT"):]))
+	if rest == "" {
+		return ""
+	}
+
+	if rest[0] == '\'' {
+		if end := strings.IndexByte(rest[1:], '\''); end != -1 {
+			return rest[:end+2]
+		}
+		return rest
+	}
+	if rest[0] == '(' {
+		depth := 0
+		for i, c := range rest {
+			switch c {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					return rest[:i+1]
+				}
+			}
+		}
+		return rest
+	}
+
+	value := strings.Fields(rest)[0]
+	// A call keeps its parentheses: now() is one token only if nothing splits it.
+	if open := strings.IndexByte(value, '('); open != -1 && !strings.Contains(value, ")") {
+		if end := strings.IndexByte(rest, ')'); end != -1 {
+			return rest[:end+1]
+		}
+	}
+	return value
+}
+
+// splitAndTrimNames splits a parenthesised identifier list.
+func splitAndTrimNames(list string) []string {
+	parts := strings.Split(list, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if name := strings.Trim(strings.TrimSpace(p), "`\"[]"); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // sqliteIndexHeaderRe reads the index name and target table out of a CREATE
@@ -349,65 +486,31 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	s.buf.Reset()
 
-	// Generate tables
-	for i, table := range schema.Tables {
-		s.buf.WriteString("CREATE TABLE ")
-		s.buf.WriteString(table.Name)
-		s.buf.WriteString(" (\n")
+	// Dump tools do not order tables by dependency, so a child table can precede
+	// its parent. SQLite has no ALTER TABLE ADD CONSTRAINT, so a foreign key it
+	// cannot place inline cannot be added later either. It does allow a
+	// reference to a table that does not exist yet, so the ones the other
+	// dialects defer are written inline here and ordering is for the reader.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
-		// Generate columns
-		for j, col := range table.Columns {
-			s.buf.WriteString("    ")
-			s.buf.WriteString(col.Name)
-			s.buf.WriteByte(' ')
-			s.buf.WriteString(col.DataType)
+	for i, table := range tables {
+		s.buf.WriteString(s.generateTableSQL(table, deferredFKs[table.Name]))
+		s.buf.WriteString(";\n")
 
-			if col.IsPrimaryKey && col.DataType == "INTEGER" {
-				s.buf.WriteString(" PRIMARY KEY")
-			} else {
-				if col.Length > 0 && col.DataType != "TEXT" {
-					if col.Scale > 0 {
-						fmt.Fprintf(s.buf, "(%d,%d)", col.Length, col.Scale)
-					} else {
-						fmt.Fprintf(s.buf, "(%d)", col.Length)
-					}
-				}
-
-				if !col.IsNullable {
-					s.buf.WriteString(" NOT NULL")
-				}
-
-				if col.IsUnique {
-					s.buf.WriteString(" UNIQUE")
-				}
-			}
-
-			if j < len(table.Columns)-1 {
-				s.buf.WriteByte(',')
-			}
-			s.buf.WriteByte('\n')
-		}
-
-		s.buf.WriteString(");\n")
-
-		// Add indexes
 		for _, idx := range table.Indexes {
-			if idx.IsUnique {
-				s.buf.WriteString("CREATE UNIQUE INDEX ")
-			} else {
-				s.buf.WriteString("CREATE INDEX ")
-			}
-			s.buf.WriteString(idx.Name)
-			s.buf.WriteString(" ON ")
-			s.buf.WriteString(table.Name)
-			s.buf.WriteByte('(')
-			s.buf.WriteString(strings.Join(idx.Columns, ", "))
-			s.buf.WriteString(");\n")
+			s.buf.WriteString(s.generateIndexSQL(table.Name, idx))
+			s.buf.WriteString(";\n")
 		}
 
-		if i < len(schema.Tables)-1 {
+		if i < len(tables)-1 {
 			s.buf.WriteByte('\n')
 		}
+	}
+
+	// Views are emitted after the tables they select from.
+	for _, view := range schema.Views {
+		body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLite)
+		fmt.Fprintf(s.buf, "\nCREATE VIEW %s AS %s;\n", view.Name, body)
 	}
 
 	// Routines come after everything they can refer to.
@@ -558,44 +661,74 @@ func (s *SQLite) parseTriggers(statement string) error {
 }
 
 // generateTableSQL generates SQL for a table
-func (s *SQLite) generateTableSQL(table sqlmapper.Table) string {
-	sql := "CREATE TABLE " + table.Name + " (\n"
+func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Constraint) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "CREATE TABLE %s (\n", table.Name)
 
-	// Generate columns
-	for i, col := range table.Columns {
-		sql += "    " + col.Name + " " + col.DataType
-		if col.Length > 0 {
-			sql += fmt.Sprintf("(%d", col.Length)
-			if col.Scale > 0 {
-				sql += fmt.Sprintf(",%d", col.Scale)
-			}
-			sql += ")"
+	// A single auto-increment primary key is written on the column, because
+	// AUTOINCREMENT is only legal directly after INTEGER PRIMARY KEY.
+	rowidAlias := rowidAliasColumn(table)
+	inlinePK := singleColumnPK(table)
+	if inlinePK == rowidAlias {
+		inlinePK = ""
+	}
+
+	parts := make([]string, 0, len(table.Columns)+len(table.Constraints))
+
+	for _, col := range table.Columns {
+		var def strings.Builder
+		def.WriteString("    " + col.Name + " ")
+
+		if col.Name == rowidAlias {
+			def.WriteString("INTEGER PRIMARY KEY AUTOINCREMENT")
+			parts = append(parts, def.String())
+			continue
 		}
 
-		if col.IsPrimaryKey {
-			sql += " PRIMARY KEY"
-			if col.AutoIncrement {
-				sql += " AUTOINCREMENT"
-			}
-		}
-		if !col.IsNullable {
-			sql += " NOT NULL"
+		def.WriteString(sqliteColumnType(col))
+		if col.Name == inlinePK {
+			// A single-column key is declared here rather than at the end,
+			// which is how SQLite gets its rowid alias.
+			def.WriteString(" PRIMARY KEY")
+		} else if !col.IsNullable {
+			def.WriteString(" NOT NULL")
 		}
 		if col.IsUnique {
-			sql += " UNIQUE"
+			def.WriteString(" UNIQUE")
 		}
 		if col.DefaultValue != "" {
-			sql += " DEFAULT " + col.DefaultValue
+			def.WriteString(" DEFAULT " + expr.Value(col.DefaultValue, expr.SQLite))
 		}
+		if col.CheckExpression != "" {
+			def.WriteString(" CHECK (" + expr.Condition(col.CheckExpression, expr.SQLite) + ")")
+		}
+		parts = append(parts, def.String())
+	}
 
-		if i < len(table.Columns)-1 {
-			sql += ",\n"
+	for _, c := range table.Constraints {
+		// The key is already on the column, so declaring it again would be a
+		// second primary key.
+		if c.Type == "PRIMARY KEY" && len(c.Columns) == 1 &&
+			(c.Columns[0] == rowidAlias || c.Columns[0] == inlinePK) {
+			continue
+		}
+		if sql := s.generateConstraintSQL(c); sql != "" {
+			parts = append(parts, "    "+sql)
 		}
 	}
 
-	sql += "\n)"
+	// A foreign key that closes a cycle has nowhere else to go: SQLite cannot
+	// add one afterwards, and it accepts a reference to a table declared later.
+	for _, c := range extraFKs {
+		if sql := s.generateConstraintSQL(c); sql != "" {
+			parts = append(parts, "    "+sql)
+		}
+	}
 
-	return sql
+	sb.WriteString(strings.Join(parts, ",\n"))
+	sb.WriteString("\n)")
+
+	return sb.String()
 }
 
 // generateIndexSQL generates SQL for an index
@@ -607,7 +740,10 @@ func (s *SQLite) generateIndexSQL(tableName string, index sqlmapper.Index) strin
 		sql = "CREATE INDEX "
 	}
 
-	sql += index.Name + " ON " + tableName + " (" + strings.Join(index.Columns, ", ") + ")"
+	sql += index.Name + " ON " + tableName + "(" + strings.Join(index.Columns, ", ") + ")"
+	if index.Condition != "" {
+		sql += " WHERE " + expr.Condition(index.Condition, expr.SQLite)
+	}
 
 	return sql
 }
@@ -741,4 +877,179 @@ func (s *SQLite) generateRoutinesSQL(schema *sqlmapper.Schema) string {
 	}
 
 	return sb.String()
+}
+
+// toSQLiteType maps a type from any source dialect to the SQLite equivalent.
+//
+// SQLite has five storage classes and decides affinity from the name, so an
+// unmapped type is not an error there. It is still wrong: a column written as
+// "timestamp with time zone" or "jsonb" tells the reader the database supports
+// something it does not, and the affinity SQLite infers from such a name is
+// rarely the one intended.
+var toSQLiteType = map[string]string{
+	// Whole numbers. SQLite has one integer class, so width is not carried.
+	"tinyint": "INTEGER", "smallint": "INTEGER", "mediumint": "INTEGER",
+	"int": "INTEGER", "integer": "INTEGER", "bigint": "INTEGER",
+	"int2": "INTEGER", "int4": "INTEGER", "int8": "INTEGER",
+	"serial": "INTEGER", "smallserial": "INTEGER", "bigserial": "INTEGER",
+	"number": "INTEGER", "year": "INTEGER",
+
+	// SQLite has no boolean; it stores 0 and 1.
+	"bool": "INTEGER", "boolean": "INTEGER", "bit": "INTEGER",
+
+	// Approximate numbers.
+	"real": "REAL", "float": "REAL", "float4": "REAL", "float8": "REAL",
+	"double": "REAL", "double precision": "REAL",
+	"binary_float": "REAL", "binary_double": "REAL",
+
+	// Exact numbers keep their precision, which SQLite accepts and which says
+	// what the column was for.
+	"decimal": "NUMERIC", "numeric": "NUMERIC", "dec": "NUMERIC",
+	"money": "NUMERIC", "smallmoney": "NUMERIC",
+
+	// Text. Length is dropped: SQLite does not enforce it.
+	"char": "TEXT", "nchar": "TEXT", "character": "TEXT",
+	"varchar": "TEXT", "nvarchar": "TEXT", "varchar2": "TEXT", "nvarchar2": "TEXT",
+	"character varying": "TEXT", "string": "TEXT",
+	"text": "TEXT", "ntext": "TEXT", "tinytext": "TEXT",
+	"mediumtext": "TEXT", "longtext": "TEXT",
+	"clob": "TEXT", "nclob": "TEXT", "xml": "TEXT",
+	"json": "TEXT", "jsonb": "TEXT",
+	"uuid": "TEXT", "uniqueidentifier": "TEXT",
+	"enum": "TEXT", "set": "TEXT",
+	"inet": "TEXT", "cidr": "TEXT", "macaddr": "TEXT",
+
+	// Dates and times. SQLite has no date type; ISO-8601 text is what its own
+	// date functions read.
+	"date": "TEXT", "time": "TEXT", "datetime": "TEXT", "datetime2": "TEXT",
+	"smalldatetime": "TEXT", "datetimeoffset": "TEXT",
+	"timestamp": "TEXT", "timestamptz": "TEXT",
+	"timestamp with time zone": "TEXT", "timestamp without time zone": "TEXT",
+	"time with time zone": "TEXT", "time without time zone": "TEXT",
+	"interval": "TEXT",
+
+	// Binary.
+	"blob": "BLOB", "tinyblob": "BLOB", "mediumblob": "BLOB", "longblob": "BLOB",
+	"bytea": "BLOB", "binary": "BLOB", "varbinary": "BLOB", "image": "BLOB",
+	"raw": "BLOB", "long raw": "BLOB", "bfile": "BLOB",
+}
+
+// sqliteColumnType renders a column's type, with the precision that survives.
+func sqliteColumnType(col sqlmapper.Column) string {
+	// An array has no SQLite equivalent, so it travels as text the way it does
+	// on the way to MySQL.
+	if col.IsArray {
+		return "TEXT"
+	}
+
+	name := strings.ToLower(strings.Join(strings.Fields(col.DataType), " "))
+	if i := strings.Index(name, "("); i > 0 {
+		name = strings.TrimSpace(name[:i])
+	}
+
+	mapped, ok := toSQLiteType[name]
+	if !ok {
+		// An unrecognised name is left as written rather than guessed at.
+		// SQLite accepts any type name and applies its affinity rules.
+		return strings.ToUpper(col.DataType)
+	}
+
+	// Numeric types carry their precision across, which SQLite accepts and which
+	// records what the column was for. A length on TEXT is dropped because
+	// SQLite does not enforce one, and INTEGER has no width to state.
+	if (mapped == "NUMERIC" || mapped == "REAL") && col.Length > 0 {
+		if col.Scale > 0 {
+			return fmt.Sprintf("%s(%d,%d)", mapped, col.Length, col.Scale)
+		}
+		return fmt.Sprintf("%s(%d)", mapped, col.Length)
+	}
+	return mapped
+}
+
+// generateConstraintSQL renders a table constraint.
+func (s *SQLite) generateConstraintSQL(c sqlmapper.Constraint) string {
+	var sb strings.Builder
+	if c.Name != "" {
+		fmt.Fprintf(&sb, "CONSTRAINT %s ", c.Name)
+	}
+	switch c.Type {
+	case "PRIMARY KEY":
+		fmt.Fprintf(&sb, "PRIMARY KEY (%s)", strings.Join(c.Columns, ", "))
+	case "FOREIGN KEY":
+		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
+		if c.DeleteRule != "" {
+			sb.WriteString(" ON DELETE " + c.DeleteRule)
+		}
+		if c.UpdateRule != "" {
+			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+		}
+	case "UNIQUE":
+		fmt.Fprintf(&sb, "UNIQUE (%s)", strings.Join(c.Columns, ", "))
+	case "CHECK":
+		fmt.Fprintf(&sb, "CHECK (%s)", expr.Condition(c.CheckExpression, expr.SQLite))
+	}
+	return sb.String()
+}
+
+// rowidAliasColumn returns the column that becomes SQLite's rowid alias, or an
+// empty string when the table has none.
+//
+// AUTOINCREMENT is only legal directly after INTEGER PRIMARY KEY on a single
+// column, so that case is written inline and the table-level PRIMARY KEY is
+// left out to avoid declaring the key twice.
+func rowidAliasColumn(table sqlmapper.Table) string {
+	var pk *sqlmapper.Constraint
+	for i, c := range table.Constraints {
+		if c.Type == "PRIMARY KEY" {
+			pk = &table.Constraints[i]
+			break
+		}
+	}
+
+	for _, col := range table.Columns {
+		if !col.AutoIncrement {
+			continue
+		}
+		if col.IsPrimaryKey {
+			return col.Name
+		}
+		if pk != nil && len(pk.Columns) == 1 && pk.Columns[0] == col.Name {
+			return col.Name
+		}
+	}
+	return ""
+}
+
+// singleColumnPK returns the column that holds the table's whole primary key,
+// whether it was recorded on the column or as a table constraint. It is empty
+// for a composite key, which has to be declared at the end.
+func singleColumnPK(table sqlmapper.Table) string {
+	for _, c := range table.Constraints {
+		if c.Type != "PRIMARY KEY" {
+			continue
+		}
+		if len(c.Columns) == 1 {
+			return c.Columns[0]
+		}
+		return ""
+	}
+
+	var found string
+	for _, col := range table.Columns {
+		if !col.IsPrimaryKey {
+			continue
+		}
+		if found != "" {
+			return "" // composite
+		}
+		found = col.Name
+	}
+	return found
+}
+
+// isSQLiteInternalTable reports whether a table belongs to SQLite rather than to
+// the schema. Their names are reserved: SQLite refuses to create one.
+func isSQLiteInternalTable(name string) bool {
+	return strings.HasPrefix(strings.ToLower(name), "sqlite_")
 }

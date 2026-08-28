@@ -25,9 +25,9 @@ package and implements [Database]:
 		return err
 	}
 
-MySQL and PostgreSQL are the best covered pair and the one the test suite
-exercises against real database servers. The other three dialects are usable but
-less complete.
+Every pair is exercised against real database servers: a schema is taken out of
+the source with its own dump tool, converted, and loaded into the target. MySQL
+and PostgreSQL are the pair with the most regression tests behind them.
 
 # What is converted
 

@@ -246,9 +246,11 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		return fmt.Errorf("schema cannot be nil")
 	}
 
-	// Write tables
-	for _, table := range schema.Tables {
-		stmt := p.sqlite.generateTableSQL(table)
+	// Write tables in the order Generate uses, so a streamed schema reads the
+	// same way and a child table does not precede its parent.
+	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+	for _, table := range tables {
+		stmt := p.sqlite.generateTableSQL(table, deferredFKs[table.Name])
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}

@@ -163,21 +163,28 @@ its own tool (`pg_dump`, `mysqldump`, `mariadb-dump`, `DBMS_METADATA.GET_DDL`,
 an SSMS-shaped script both SQL Server versions accept), converting it, and
 loading the result into the target server.
 
-| Source \ Target | PG 13 | PG 17 | MySQL 5.7 | MySQL 8.4 | MariaDB 11 | Oracle 21 | Oracle 23ai | MSSQL 2019 | MSSQL 2022 |
-| --------------- | ----- | ----- | --------- | --------- | ---------- | --------- | ----------- | ---------- | ---------- |
-| PostgreSQL 13   | -     | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
-| PostgreSQL 17   | pass  | -     | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
-| MySQL 5.7       | pass  | pass  | -         | pass      | pass       | pass      | pass        | pass       | pass       |
-| MySQL 8.4       | pass  | pass  | pass      | -         | pass       | pass      | pass        | pass       | pass       |
-| MariaDB 11      | pass  | pass  | pass      | pass      | -          | pass      | pass        | pass       | pass       |
-| Oracle 21 XE    | pass  | pass  | pass      | pass      | pass       | -         | pass        | pass       | pass       |
-| Oracle 23ai     | pass  | pass  | pass      | pass      | pass       | pass      | -           | pass       | pass       |
-| SQL Server[^s]  | pass  | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       |
+| Source \ Target | PG 13 | PG 17 | MySQL 5.7 | MySQL 8.4 | MariaDB 11 | Oracle 21 | Oracle 23ai | MSSQL 2019 | MSSQL 2022 | SQLite 3 |
+| --------------- | ----- | ----- | --------- | --------- | ---------- | --------- | ----------- | ---------- | ---------- | -------- |
+| PostgreSQL 13   | -     | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       | pass     |
+| PostgreSQL 17   | pass  | -     | pass      | pass      | pass       | pass      | pass        | pass       | pass       | pass     |
+| MySQL 5.7       | pass  | pass  | -         | pass      | pass       | pass      | pass        | pass       | pass       | pass     |
+| MySQL 8.4       | pass  | pass  | pass      | -         | pass       | pass      | pass        | pass       | pass       | pass     |
+| MariaDB 11      | pass  | pass  | pass      | pass      | -          | pass      | pass        | pass       | pass       | pass     |
+| Oracle 21 XE    | pass  | pass  | pass      | pass      | pass       | -         | pass        | pass       | pass       | pass     |
+| Oracle 23ai     | pass  | pass  | pass      | pass      | pass       | pass      | -           | pass       | pass       | pass     |
+| SQL Server[^s]  | pass  | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       | pass     |
+| SQLite 3[^l]    | pass  | pass  | pass      | pass      | pass       | pass      | pass        | pass       | pass       | -        |
 
 [^s]:
     SQL Server has no dump CLI in the box. The source script is in the shape
     SSMS "Generate Scripts" produces, and both 2019 and 2022 accept it verbatim,
     which is what makes it a real fixture rather than a convenient one.
+
+[^l]:
+    The SQLite fixture is `sqlite3 .schema` output, including the
+    `sqlite_sequence` table SQLite writes for itself. Its row was verified
+    against the newer release in each target family; the SQL a SQLite source
+    produces carries no version-specific syntax.
 
 Version differences the converter has to handle, all of them found by running
 this matrix rather than by reading documentation:
@@ -203,6 +210,14 @@ this matrix rather than by reading documentation:
   inside them. It also writes each view twice, a stand-in of `SELECT 1 AS col`
   first so that anything referring to it can be created, then the real
   definition at the end, and the last one is the one that counts.
+- SQLite has no length to give: its `TEXT` is unbounded. No other database will
+  index that. MySQL asks for a prefix length, SQL Server refuses
+  `NVARCHAR(MAX)` as a key column, and Oracle cannot index a `CLOB` at all, so a
+  column a key touches is bounded on the way out. It also has no boolean and no
+  date type, so `WHERE is_active` on an integer column becomes
+  `WHERE is_active <> 0` for PostgreSQL, and a text column defaulting to
+  `CURRENT_TIMESTAMP` becomes `TO_CHAR(SYSTIMESTAMP)` for Oracle, which will not
+  assign a timestamp to a character column.
 - `pg_dump` puts a function's attributes between `RETURNS` and the body,
   `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ ... $$`, where
   hand-written SQL usually puts `LANGUAGE` after it.
@@ -288,8 +303,8 @@ Issues and pull requests are welcome. If you hit a dump that converts wrongly,
 the most useful bug report is the smallest fragment of SQL that reproduces it,
 which dialect and version produced it, and what you expected to come out.
 
-The dialects with the least coverage are SQLite, Oracle and SQL Server, and the
-gaps there are worth more than polish elsewhere. Every fix in this repository
+Oracle and SQL Server have the fewest regression tests behind them, and the gaps
+there are worth more than polish elsewhere. Every fix in this repository
 carries a regression test built from real dump tool output rather than
 hand-shaped SQL; see `tests/integration` and the `*_real_ddl_test.go` files for
 the shape to follow.

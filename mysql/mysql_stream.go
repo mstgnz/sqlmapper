@@ -278,7 +278,7 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
-			stmt := p.mysql.generateIndexSQL(table.Name, index)
+			stmt := p.mysql.generateIndexSQL(table.Name, index, columnsByName(table))
 			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
@@ -288,7 +288,7 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 	// Foreign keys that close a cycle are added once every table exists.
 	for _, table := range tables {
 		for _, c := range deferredFKs[table.Name] {
-			stmt := fmt.Sprintf("ALTER TABLE %s ADD %s;\n", table.Name, p.mysql.generateConstraintSQL(c))
+			stmt := fmt.Sprintf("ALTER TABLE %s ADD %s;\n", table.Name, p.mysql.generateConstraintSQL(c, columnsByName(table)))
 			if _, err := writer.Write([]byte(stmt)); err != nil {
 				return err
 			}

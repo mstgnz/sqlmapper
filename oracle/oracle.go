@@ -1075,7 +1075,32 @@ var oracleNoLengthTypes = map[string]bool{
 }
 
 // resolveType maps a column onto the Oracle type it should be declared as.
+// oracleKeyTextType is what an unbounded text column becomes when it has to be
+// indexed. Oracle cannot index a CLOB at all, and the length has to leave room
+// for a multi-byte character set inside the index key limit.
+const oracleKeyTextType = "VARCHAR2(1000)"
+
 func (o *Oracle) resolveType(col sqlmapper.Column) string {
+	return o.resolveTypeForKey(col, false)
+}
+
+// resolveTypeForKey renders a column's type, bounding an unbounded text column
+// when the table indexes it.
+func (o *Oracle) resolveTypeForKey(col sqlmapper.Column, isKey bool) string {
+	rendered := o.resolveTypeName(col)
+	if isKey && col.Length == 0 && oracleUnboundedText[rendered] {
+		return oracleKeyTextType
+	}
+	return rendered
+}
+
+// oracleUnboundedText are the Oracle types that carry no length and so cannot
+// take part in an index.
+var oracleUnboundedText = map[string]bool{
+	"CLOB": true, "NCLOB": true, "BLOB": true, "LONG": true,
+}
+
+func (o *Oracle) resolveTypeName(col sqlmapper.Column) string {
 	lower := strings.ToLower(strings.TrimSpace(col.DataType))
 
 	// Oracle has no array type; a serialised value in a CLOB is the closest it
@@ -1101,8 +1126,8 @@ func (o *Oracle) resolveType(col sqlmapper.Column) string {
 
 // generateColumnSQL renders one column. inlinePK reports whether this column
 // carries the PRIMARY KEY marker itself.
-func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK bool) string {
-	oracleType := o.resolveType(col)
+func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey bool) string {
+	oracleType := o.resolveTypeForKey(col, isKey)
 	sql := col.Name + " " + oracleType
 
 	if col.DefaultValue != "" && !col.AutoIncrement {
@@ -1143,6 +1168,12 @@ func (o *Oracle) defaultLiteral(col sqlmapper.Column, oracleType string) string 
 	}
 
 	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
+		// A character column cannot be assigned a timestamp: Oracle answers
+		// ORA-00932. SQLite stores the current time as text and means exactly
+		// this conversion, so it is written out rather than dropped.
+		if oracleIsCharacterType(oracleType) {
+			return "TO_CHAR(SYSTIMESTAMP)"
+		}
 		return "SYSTIMESTAMP"
 	}
 	if isNumericLiteral(dv) {
@@ -1247,9 +1278,13 @@ func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Co
 		}
 	}
 
+	// A column the table indexes cannot be an unbounded CLOB, so the type
+	// resolution needs to know which ones those are.
+	keyCols := sqlmapper.KeyColumns(table)
+
 	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
 	for _, col := range table.Columns {
-		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name]))
+		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name], keyCols[col.Name]))
 	}
 	for _, c := range tableConstraints {
 		if sql := o.generateConstraintSQL(c); sql != "" {
@@ -1399,4 +1434,17 @@ func (o *Oracle) generateRoutinesSQL(schema *sqlmapper.Schema) string {
 		sb.WriteString("\n/\n\n")
 	}
 	return sb.String()
+}
+
+// oracleIsCharacterType reports whether a rendered type holds text.
+func oracleIsCharacterType(rendered string) bool {
+	name := rendered
+	if i := strings.IndexByte(name, '('); i != -1 {
+		name = name[:i]
+	}
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "CLOB", "NCLOB", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "LONG":
+		return true
+	}
+	return false
 }

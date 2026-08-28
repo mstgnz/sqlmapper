@@ -217,3 +217,69 @@ END;`
 	assert.Equal(t, "INSERT", schema.Triggers[0].Event)
 	assert.Equal(t, "users", schema.Triggers[0].Table)
 }
+
+func TestSQLiteDefaultValue(t *testing.T) {
+	tests := map[string]string{
+		"n INTEGER DEFAULT 1":                       "1",
+		"n INTEGER NOT NULL DEFAULT 0":              "0",
+		"s TEXT DEFAULT 'draft'":                    "'draft'",
+		"s TEXT DEFAULT 'two words'":                "'two words'",
+		"t TEXT DEFAULT CURRENT_TIMESTAMP":          "CURRENT_TIMESTAMP",
+		"t TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL": "CURRENT_TIMESTAMP",
+		"t TEXT DEFAULT (datetime('now'))":          "(datetime('now'))",
+		"n INTEGER":                                 "",
+		"n INTEGER DEFAULT":                         "",
+		"s TEXT DEFAULT 'unterminated":              "'unterminated",
+	}
+
+	for def, want := range tests {
+		if got := sqliteDefaultValue([]byte(def)); got != want {
+			t.Errorf("sqliteDefaultValue(%q) = %q, want %q", def, got, want)
+		}
+	}
+}
+
+func TestSQLiteColumnType(t *testing.T) {
+	tests := []struct {
+		col  sqlmapper.Column
+		want string
+	}{
+		{sqlmapper.Column{DataType: "bigint"}, "INTEGER"},
+		{sqlmapper.Column{DataType: "VARCHAR(255)"}, "TEXT"},
+		{sqlmapper.Column{DataType: "varchar", Length: 255}, "TEXT"},
+		{sqlmapper.Column{DataType: "numeric", Length: 10, Scale: 2}, "NUMERIC(10,2)"},
+		{sqlmapper.Column{DataType: "numeric", Length: 10}, "NUMERIC(10)"},
+		{sqlmapper.Column{DataType: "real", Length: 10, Scale: 2}, "REAL(10,2)"},
+		{sqlmapper.Column{DataType: "text", IsArray: true}, "TEXT"},
+		// A name SQLite does not know is left as written rather than guessed at.
+		{sqlmapper.Column{DataType: "geography"}, "GEOGRAPHY"},
+	}
+
+	for _, tt := range tests {
+		if got := sqliteColumnType(tt.col); got != tt.want {
+			t.Errorf("sqliteColumnType(%+v) = %q, want %q", tt.col, got, tt.want)
+		}
+	}
+}
+
+func TestSQLiteTableConstraintRejectsAColumn(t *testing.T) {
+	if _, ok := parseSQLiteTableConstraint([]byte("id INTEGER NOT NULL")); ok {
+		t.Error("a column definition is not a table constraint")
+	}
+	if _, ok := parseSQLiteTableConstraint([]byte("PRIMARY KEY (a, b)")); !ok {
+		t.Error("a table-level primary key is a constraint")
+	}
+}
+
+func TestIsSQLiteInternalTable(t *testing.T) {
+	for _, name := range []string{"sqlite_sequence", "sqlite_stat1", "SQLITE_MASTER"} {
+		if !isSQLiteInternalTable(name) {
+			t.Errorf("%q belongs to SQLite", name)
+		}
+	}
+	for _, name := range []string{"customers", "sqlitex", "my_sqlite_table"} {
+		if isSQLiteInternalTable(name) {
+			t.Errorf("%q is a normal table", name)
+		}
+	}
+}

@@ -16,6 +16,12 @@ import "strings"
 // Text that cannot be read comes back unchanged, so a body this package does
 // not understand is no worse off than before.
 func TranslateViewBody(body string, to Dialect) string {
+	return TranslateViewBodyWithBooleans(body, to, nil)
+}
+
+// TranslateViewBodyWithBooleans is TranslateViewBody told which columns the
+// target really declares as boolean.
+func TranslateViewBodyWithBooleans(body string, to Dialect, booleans map[string]bool) string {
 	// A qualifier naming another dialect's default schema has to go from the
 	// whole body, not only the part that gets translated: public.customers in a
 	// FROM clause does not resolve anywhere but PostgreSQL.
@@ -31,7 +37,7 @@ func TranslateViewBody(body string, to Dialect) string {
 		return body
 	}
 
-	translated := Condition(clause, to)
+	translated := ConditionWithBooleans(clause, to, booleans)
 	if translated == clause {
 		return body
 	}

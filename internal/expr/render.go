@@ -13,6 +13,16 @@ type Options struct {
 	// as the body of a CHECK or the WHERE clause of a view. In a dialect with no
 	// boolean type, a bare column there is rewritten to compare against zero.
 	Condition bool
+
+	// BooleanColumns names the columns the target really declares as boolean,
+	// lower-cased. A bare column standing where a condition belongs is only
+	// valid in PostgreSQL when the column is one, and a source with no boolean
+	// type of its own, SQLite for instance, gives it an integer: PostgreSQL
+	// answers "argument of WHERE must be type boolean, not type integer".
+	//
+	// A nil map means the caller does not know, and every bare column is taken
+	// at its word.
+	BooleanColumns map[string]bool
 }
 
 // SQL renders an expression for the given dialect.
@@ -66,7 +76,7 @@ func (r *renderer) write(b *strings.Builder, e Expr, floor int, cond bool) {
 		// A bare column standing where a condition belongs is a boolean use.
 		// Oracle and SQL Server have no boolean, so the comparison has to be
 		// written out or the statement will not parse there.
-		if cond && !r.dialect.hasBoolean() {
+		if cond && !r.booleanUsable(n.Name) {
 			b.WriteString(name)
 			b.WriteString(" <> 0")
 			return
@@ -268,11 +278,30 @@ func IsJSONGuard(e Expr) bool {
 // worked before this layer existed keeps working: the worst case is the old
 // behaviour of copying the expression across verbatim.
 func Condition(sql string, to Dialect) string {
+	return ConditionWithBooleans(sql, to, nil)
+}
+
+// ConditionWithBooleans is Condition told which columns the target really
+// declares as boolean, so a bare column that is an integer there is compared
+// against zero instead of being left to fail.
+func ConditionWithBooleans(sql string, to Dialect, booleans map[string]bool) string {
 	e, err := Parse(sql)
 	if err != nil {
 		return strings.TrimSpace(sql)
 	}
-	return Render(e, to, Options{Condition: true})
+	return Render(e, to, Options{Condition: true, BooleanColumns: booleans})
+}
+
+// booleanUsable reports whether a bare column can stand as a condition on its
+// own in the target.
+func (r *renderer) booleanUsable(name string) bool {
+	if !r.dialect.hasBoolean() {
+		return false
+	}
+	if r.opts.BooleanColumns == nil {
+		return true
+	}
+	return r.opts.BooleanColumns[strings.ToLower(name)]
 }
 
 // Value translates an expression used where a value is expected, such as a

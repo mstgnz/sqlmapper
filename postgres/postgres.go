@@ -256,8 +256,9 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// Views are emitted last so the tables they select from already exist. The
 	// body is carried over verbatim: this package converts DDL structure, not
 	// query syntax, so a view written in another dialect's SQL may need editing.
+	booleans := p.booleanColumns(schema)
 	for _, view := range schema.Views {
-		result.WriteString(p.generateViewSQL(view))
+		result.WriteString(p.generateViewSQL(view, booleans))
 		result.WriteString("\n")
 	}
 
@@ -272,8 +273,8 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 
 // generateViewSQL renders a view definition. The SELECT body is passed through
 // unchanged; only the wrapper is dialect-specific.
-func (p *PostgreSQL) generateViewSQL(view sqlmapper.View) string {
-	body := expr.TranslateViewBody(strings.TrimSpace(view.Definition), expr.PostgreSQL)
+func (p *PostgreSQL) generateViewSQL(view sqlmapper.View, booleans map[string]bool) string {
+	body := expr.TranslateViewBodyWithBooleans(strings.TrimSpace(view.Definition), expr.PostgreSQL, booleans)
 	body = strings.TrimSuffix(body, ";")
 	keyword := "CREATE VIEW"
 	if view.IsMaterialized {
@@ -1343,6 +1344,24 @@ func (p *PostgreSQL) generateColumnSQL(col sqlmapper.Column, tableName string, i
 }
 
 // resolveType maps a column's DataType to the PostgreSQL equivalent.
+// booleanColumns names the columns this generator will declare as boolean.
+//
+// PostgreSQL is the only target with a strict boolean, so it is the only one
+// that rejects "WHERE is_active" when the column is an integer. A source with
+// no boolean type of its own, SQLite for instance, gives it exactly that.
+func (p *PostgreSQL) booleanColumns(schema *sqlmapper.Schema) map[string]bool {
+	out := make(map[string]bool)
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			name := strings.ToLower(strings.TrimSpace(p.resolveType(col, table.Name)))
+			if name == "boolean" || name == "bool" {
+				out[strings.ToLower(col.Name)] = true
+			}
+		}
+	}
+	return out
+}
+
 func (p *PostgreSQL) resolveType(col sqlmapper.Column, tableName string) string {
 	lower := strings.ToLower(col.DataType)
 

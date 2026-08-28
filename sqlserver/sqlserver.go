@@ -366,7 +366,32 @@ var sqlServerNoLengthTypes = map[string]bool{
 }
 
 // resolveType maps a column onto the SQL Server type it should be declared as.
+// sqlServerKeyTextType is what an unbounded text column becomes when it has to
+// be indexed. SQL Server refuses NVARCHAR(MAX) as a key column, and 450 is the
+// longest nvarchar that fits the 900-byte index key limit.
+const sqlServerKeyTextType = "NVARCHAR(450)"
+
+// sqlServerUnboundedText are the types SQL Server will not index.
+var sqlServerUnboundedText = map[string]bool{
+	"NVARCHAR(MAX)": true, "VARCHAR(MAX)": true, "VARBINARY(MAX)": true,
+	"TEXT": true, "NTEXT": true, "IMAGE": true, "XML": true,
+}
+
 func (s *SQLServer) resolveType(col sqlmapper.Column) string {
+	return s.resolveTypeForKey(col, false)
+}
+
+// resolveTypeForKey renders a column's type, bounding an unbounded text column
+// when the table indexes it.
+func (s *SQLServer) resolveTypeForKey(col sqlmapper.Column, isKey bool) string {
+	rendered := s.resolveTypeName(col)
+	if isKey && col.Length == 0 && sqlServerUnboundedText[strings.ToUpper(rendered)] {
+		return sqlServerKeyTextType
+	}
+	return rendered
+}
+
+func (s *SQLServer) resolveTypeName(col sqlmapper.Column) string {
 	lower := strings.ToLower(strings.TrimSpace(col.DataType))
 
 	// SQL Server has no array type; a serialised value is the closest it gets.
@@ -432,7 +457,9 @@ func isNumericLiteral(s string) bool {
 func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 	var sb strings.Builder
 	if c.Name != "" {
-		sb.WriteString("CONSTRAINT " + c.Name + " ")
+		sb.WriteString("CONSTRAINT ")
+		sb.WriteString(c.Name)
+		sb.WriteString(" ")
 	}
 	switch c.Type {
 	case "PRIMARY KEY":
@@ -443,13 +470,15 @@ func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
 		if c.DeleteRule != "" {
-			sb.WriteString(" ON DELETE " + c.DeleteRule)
+			sb.WriteString(" ON DELETE ")
+			sb.WriteString(c.DeleteRule)
 		}
 		if c.UpdateRule != "" {
-			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+			sb.WriteString(" ON UPDATE ")
+			sb.WriteString(c.UpdateRule)
 		}
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.SQLServer)))
+		fmt.Fprintf(&sb, "CHECK (%s)", expr.Condition(c.CheckExpression, expr.SQLServer))
 	}
 	return sb.String()
 }
@@ -458,7 +487,9 @@ func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 // constraints. deferred lists the foreign keys added afterwards.
 func (s *SQLServer) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Constraint) string {
 	var out strings.Builder
-	out.WriteString("CREATE TABLE " + table.Name + " (\n")
+	out.WriteString("CREATE TABLE ")
+	out.WriteString(table.Name)
+	out.WriteString(" (\n")
 
 	inlinePKCols := map[string]bool{}
 	var tableConstraints []sqlmapper.Constraint
@@ -502,9 +533,13 @@ func (s *SQLServer) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper
 		}
 	}
 
+	// A column the table indexes cannot be NVARCHAR(MAX), so the type
+	// resolution needs to know which ones those are.
+	keyCols := sqlmapper.KeyColumns(table)
+
 	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
 	for _, col := range table.Columns {
-		mssType := s.resolveType(col)
+		mssType := s.resolveTypeForKey(col, keyCols[col.Name])
 		def := "    " + col.Name + " " + mssType
 		if col.AutoIncrement {
 			def += " IDENTITY(1,1)"

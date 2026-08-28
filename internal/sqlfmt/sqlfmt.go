@@ -68,14 +68,17 @@ func SourceRoutineSQL(header, body string) string {
 // form every dialect spells more or less the same way.
 func TriggerHeader(name, timing, event, table string, forEachRow bool) string {
 	var sb strings.Builder
-	sb.WriteString("CREATE TRIGGER " + name)
+	sb.WriteString("CREATE TRIGGER ")
+	sb.WriteString(name)
 	for _, part := range []string{timing, event} {
 		if part != "" {
-			sb.WriteString(" " + part)
+			sb.WriteString(" ")
+			sb.WriteString(part)
 		}
 	}
 	if table != "" {
-		sb.WriteString(" ON " + table)
+		sb.WriteString(" ON ")
+		sb.WriteString(table)
 	}
 	if forEachRow {
 		sb.WriteString("\nFOR EACH ROW")

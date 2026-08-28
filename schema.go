@@ -63,6 +63,39 @@ func (s *Schema) RoutinesAreNativeTo(dialect DatabaseType) bool {
 	return s.SourceDialect == "" || s.SourceDialect == dialect
 }
 
+// KeyColumns returns the columns a table indexes, whether through a primary
+// key, a unique constraint or an index.
+//
+// It exists because the strict databases refuse to index an unbounded text
+// column: MySQL wants a prefix length, SQL Server rejects NVARCHAR(MAX)
+// outright, and Oracle cannot index a CLOB at all. A source with no length to
+// give, SQLite for instance, produces exactly that, so a generator has to know
+// which columns it must bound.
+func KeyColumns(table Table) map[string]bool {
+	out := make(map[string]bool)
+
+	for _, c := range table.Constraints {
+		switch c.Type {
+		case "PRIMARY KEY", "UNIQUE":
+			for _, col := range c.Columns {
+				out[col] = true
+			}
+		}
+	}
+	for _, idx := range table.Indexes {
+		for _, col := range idx.Columns {
+			out[col] = true
+		}
+	}
+	for _, col := range table.Columns {
+		if col.IsPrimaryKey || col.IsUnique {
+			out[col.Name] = true
+		}
+	}
+
+	return out
+}
+
 // Table represents a database table
 type Table struct {
 	Name        string

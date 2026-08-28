@@ -193,3 +193,105 @@ func TestNoDoubledTerminator(t *testing.T) {
 		})
 	}
 }
+
+// An unbounded text column cannot be indexed anywhere but SQLite: MySQL asks
+// for a prefix length, SQL Server rejects NVARCHAR(MAX) as a key, and Oracle
+// cannot index a CLOB at all. A source with no length to give produces exactly
+// that, so each generator has to bound the column or say how much of it the key
+// covers.
+func TestUnboundedTextInAKey(t *testing.T) {
+	schema := &sqlmapper.Schema{
+		SourceDialect: sqlmapper.SQLite,
+		Tables: []sqlmapper.Table{{
+			Name: "customers",
+			Columns: []sqlmapper.Column{
+				{Name: "id", DataType: "INTEGER", AutoIncrement: true},
+				{Name: "email", DataType: "TEXT", IsNullable: false},
+				{Name: "note", DataType: "TEXT"},
+			},
+			Constraints: []sqlmapper.Constraint{
+				{Type: "PRIMARY KEY", Columns: []string{"id"}},
+				{Name: "customers_email_key", Type: "UNIQUE", Columns: []string{"email"}},
+			},
+		}},
+	}
+
+	tests := []struct {
+		name           string
+		db             func() sqlmapper.Database
+		wantKeyColumn  string
+		wantFreeColumn string
+	}{
+		{"mysql", mysql.NewMySQL, "email(255)", "note TEXT"},
+		{"sqlserver", sqlserver.NewSQLServer, "email NVARCHAR(450)", "note NVARCHAR(MAX)"},
+		{"oracle", oracle.NewOracle, "email VARCHAR2(1000)", "note CLOB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tt.db().Generate(schema)
+			require.NoError(t, err)
+
+			assert.Contains(t, out, tt.wantKeyColumn, "the indexed column has to be bounded")
+			assert.Contains(t, out, tt.wantFreeColumn, "a column no key touches keeps its type")
+		})
+	}
+}
+
+// PostgreSQL is the only target with a strict boolean, so it is the only one
+// that rejects a bare column as a condition when the column is an integer.
+func TestBareConditionAgainstAnIntegerColumn(t *testing.T) {
+	integerFlag := &sqlmapper.Schema{
+		SourceDialect: sqlmapper.SQLite,
+		Tables: []sqlmapper.Table{{
+			Name:    "customers",
+			Columns: []sqlmapper.Column{{Name: "is_active", DataType: "INTEGER"}},
+		}},
+		Views: []sqlmapper.View{{
+			Name: "active", Definition: "SELECT id FROM customers WHERE is_active",
+		}},
+	}
+
+	out, err := postgres.NewPostgreSQL().Generate(integerFlag)
+	require.NoError(t, err)
+	assert.Contains(t, out, "WHERE is_active <> 0",
+		"PostgreSQL answers: argument of WHERE must be type boolean, not type integer")
+
+	// A column that really is boolean stands on its own.
+	realBool := &sqlmapper.Schema{
+		SourceDialect: sqlmapper.PostgreSQL,
+		Tables: []sqlmapper.Table{{
+			Name:    "customers",
+			Columns: []sqlmapper.Column{{Name: "is_active", DataType: "boolean"}},
+		}},
+		Views: []sqlmapper.View{{
+			Name: "active", Definition: "SELECT id FROM customers WHERE is_active",
+		}},
+	}
+
+	out, err = postgres.NewPostgreSQL().Generate(realBool)
+	require.NoError(t, err)
+	assert.Contains(t, out, "WHERE is_active")
+	assert.NotContains(t, out, "<> 0")
+}
+
+// Oracle refuses to assign a timestamp to a character column. SQLite stores the
+// current time as text and means the conversion, so it is written out.
+func TestTimestampDefaultOnATextColumn(t *testing.T) {
+	schema := &sqlmapper.Schema{
+		SourceDialect: sqlmapper.SQLite,
+		Tables: []sqlmapper.Table{{
+			Name: "customers",
+			Columns: []sqlmapper.Column{
+				{Name: "created_at", DataType: "TEXT", DefaultValue: "CURRENT_TIMESTAMP"},
+				{Name: "seen_at", DataType: "timestamp", DefaultValue: "CURRENT_TIMESTAMP"},
+			},
+		}},
+	}
+
+	out, err := oracle.NewOracle().Generate(schema)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "DEFAULT TO_CHAR(SYSTIMESTAMP)", "ORA-00932 without the conversion")
+	assert.Contains(t, out, "seen_at TIMESTAMP DEFAULT SYSTIMESTAMP", "a real timestamp needs no conversion")
+}

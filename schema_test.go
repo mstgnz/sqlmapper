@@ -163,3 +163,34 @@ func TestRoutinesAreNativeTo(t *testing.T) {
 	assert.True(t, handBuilt.RoutinesAreNativeTo(MySQL))
 	assert.True(t, handBuilt.RoutinesAreNativeTo(Oracle))
 }
+
+func TestKeyColumns(t *testing.T) {
+	table := Table{
+		Columns: []Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+			{Name: "slug", IsUnique: true},
+			{Name: "note"},
+		},
+		Constraints: []Constraint{
+			{Type: "UNIQUE", Columns: []string{"email"}},
+			{Type: "FOREIGN KEY", Columns: []string{"note"}, RefTable: "notes"},
+			{Type: "CHECK", CheckExpression: "note <> ''"},
+		},
+		Indexes: []Index{{Name: "idx", Columns: []string{"note"}}},
+	}
+
+	got := KeyColumns(table)
+
+	for _, name := range []string{"id", "email", "slug", "note"} {
+		assert.True(t, got[name], "%s is part of a key or an index", name)
+	}
+	assert.Len(t, got, 4)
+
+	// A foreign key or a check alone does not make a column indexed.
+	only := Table{Constraints: []Constraint{
+		{Type: "FOREIGN KEY", Columns: []string{"a"}},
+		{Type: "CHECK", CheckExpression: "a > 0"},
+	}}
+	assert.Empty(t, KeyColumns(only))
+}
