@@ -331,50 +331,10 @@ func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer 
 		}
 	}
 
-	// Write functions
-	for _, function := range schema.Functions {
-		if !function.IsProc {
-			stmt := fmt.Sprintf("CREATE FUNCTION %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("@%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(")\nRETURNS %s\nAS\nBEGIN\n%s\nEND",
-				function.Returns, function.Body)
-			if _, err := writer.Write([]byte(stmt + "\nGO\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write procedures
-	for _, function := range schema.Functions {
-		if function.IsProc {
-			stmt := fmt.Sprintf("CREATE PROCEDURE %s", function.Name)
-			if len(function.Parameters) > 0 {
-				stmt += "("
-				for i, param := range function.Parameters {
-					if i > 0 {
-						stmt += ", "
-					}
-					stmt += fmt.Sprintf("@%s %s", param.Name, param.DataType)
-				}
-				stmt += ")"
-			}
-			stmt += fmt.Sprintf("\nAS\nBEGIN\n%s\nEND", function.Body)
-			if _, err := writer.Write([]byte(stmt + "\nGO\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write triggers
-	for _, trigger := range schema.Triggers {
-		stmt := fmt.Sprintf("CREATE TRIGGER %s ON %s\n%s %s\nAS\nBEGIN\n%s\nEND",
-			trigger.Name, trigger.Table, trigger.Timing, trigger.Event, trigger.Body)
-		if _, err := writer.Write([]byte(stmt + "\nGO\n\n")); err != nil {
+	// Routines are rendered by the same code the file generator uses, so the
+	// streamed output and the file output agree.
+	if routines := p.sqlserver.generateRoutinesSQL(schema); routines != "" {
+		if _, err := writer.Write([]byte(routines)); err != nil {
 			return err
 		}
 	}

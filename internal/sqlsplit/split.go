@@ -48,7 +48,13 @@ func ModeFor(delimiter string) Mode {
 // routineStart matches the statements whose body carries semicolons of its own.
 // Inside one of these only the line terminator ends the statement, which is how
 // Oracle's slash and SQL Server's GO are meant to be used.
-var routineStart = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+ALTER)?(?:\s+OR\s+REPLACE)?\s+(?:FUNCTION|PROCEDURE|PROC|TRIGGER|PACKAGE|TYPE\s+BODY)|DECLARE|BEGIN)\b`)
+var routineStart = regexp.MustCompile(`(?is)^\s*(?:CREATE` +
+	`(?:\s+OR\s+ALTER)?(?:\s+OR\s+REPLACE)?` +
+	// mysqldump writes DEFINER, and a view or routine can carry ALGORITHM and
+	// SQL SECURITY too. Without them a dumped trigger did not look like a
+	// routine at all, and its body was cut at the first inner semicolon.
+	`(?:\s+DEFINER\s*=\s*\S+)?(?:\s+ALGORITHM\s*=\s*\S+)?(?:\s+SQL\s+SECURITY\s+\w+)?` +
+	`\s+(?:FUNCTION|PROCEDURE|PROC|TRIGGER|PACKAGE|TYPE\s+BODY)|DECLARE|BEGIN)\b`)
 
 // delimiterDirective matches MySQL's DELIMITER, which changes the terminator
 // for the statements that follow it.
@@ -65,6 +71,11 @@ type Splitter struct {
 
 	// dollarQuoting is off when the caller's own delimiter uses a dollar.
 	dollarQuoting bool
+
+	// versionComment counts the open /*! ... */ blocks. MySQL executes what is
+	// inside one when the server is new enough, so the content is SQL and only
+	// the wrapper is dropped.
+	versionComment int
 
 	// sawBegin records that the statement has opened a BEGIN block, and prevWord
 	// is the last complete word before the current position. Together they say
@@ -126,6 +137,7 @@ func (s *Splitter) next() (string, error) {
 	s.sawBegin = false
 	s.prevWord = ""
 	s.word.Reset()
+	s.versionComment = 0
 
 	// A DELIMITER directive is an instruction to the client rather than a
 	// statement. It has to be taken before anything else, because the semicolon
@@ -198,8 +210,25 @@ func (s *Splitter) next() (string, error) {
 				continue
 			}
 
+		case '*':
+			// The end of a version comment: the wrapper goes, the SQL inside it
+			// stays.
+			if s.versionComment > 0 {
+				if next, _ := s.r.Peek(1); len(next) == 1 && next[0] == '/' {
+					_, _ = s.r.ReadByte()
+					s.versionComment--
+					s.closeWord()
+					continue
+				}
+			}
+
 		case '/':
 			if next, _ := s.r.Peek(1); len(next) == 1 && next[0] == '*' {
+				s.closeWord()
+				if s.openVersionComment() {
+					s.versionComment++
+					continue
+				}
 				s.consumeBlockComment()
 				continue
 			}
@@ -474,6 +503,29 @@ func (s *Splitter) consumeLineComment() {
 			return
 		}
 	}
+}
+
+// openVersionComment consumes the opener of a MySQL version comment, having
+// already seen the slash and peeked the star. It reports false and consumes
+// nothing when what follows is an ordinary block comment.
+//
+// mysqldump writes a trigger as /*!50003 CREATE*/ /*!50017 DEFINER=...*/
+// /*!50003 TRIGGER ... */, so a splitter that treats the whole thing as a
+// comment throws the trigger away with it.
+func (s *Splitter) openVersionComment() bool {
+	peek, _ := s.r.Peek(8)
+	if len(peek) < 2 || peek[0] != '*' || peek[1] != '!' {
+		return false
+	}
+
+	n := 2
+	for n < len(peek) && peek[n] >= '0' && peek[n] <= '9' {
+		n++
+	}
+	if _, err := s.r.Discard(n); err != nil {
+		return false
+	}
+	return true
 }
 
 // consumeBlockComment discards to the closing marker, keeping any newlines so

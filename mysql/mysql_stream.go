@@ -9,6 +9,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -271,14 +272,14 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 	for _, table := range tables {
 		stmt := p.mysql.generateTableSQL(table, deferredFKs[table.Name])
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
 			stmt := p.mysql.generateIndexSQL(table.Name, index)
-			if _, err := writer.Write([]byte(stmt + ";\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
 		}
@@ -297,50 +298,16 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 	// Write views
 	for _, view := range schema.Views {
 		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
 
-	// Write functions
-	for _, function := range schema.Functions {
-		if !function.IsProc {
-			stmt := fmt.Sprintf("CREATE FUNCTION %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(") RETURNS %s\n%s", function.Returns, function.Body)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write procedures
-	for _, function := range schema.Functions {
-		if function.IsProc {
-			stmt := fmt.Sprintf("CREATE PROCEDURE %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(")\n%s", function.Body)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write triggers
-	for _, trigger := range schema.Triggers {
-		stmt := fmt.Sprintf("CREATE TRIGGER %s %s %s ON %s\n%s",
-			trigger.Name, trigger.Timing, trigger.Event, trigger.Table, trigger.Body)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+	// Routines are rendered by the same code the file generator uses, because
+	// the two used to disagree: this path wrote a trigger MySQL could not load
+	// and the other dropped it entirely.
+	if routines := p.mysql.generateRoutinesSQL(schema); routines != "" {
+		if _, err := writer.Write([]byte(routines)); err != nil {
 			return err
 		}
 	}

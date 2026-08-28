@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/routine"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
@@ -28,7 +30,7 @@ type SQLite struct {
 // It returns a parser that can handle SQLite specific SQL syntax and schema structures.
 func NewSQLite() sqlmapper.Database {
 	return &SQLite{
-		schema: &sqlmapper.Schema{},
+		schema: &sqlmapper.Schema{SourceDialect: sqlmapper.SQLite},
 		buf:    &bytes.Buffer{},
 	}
 }
@@ -52,7 +54,7 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 	}
 
 	s.buf = bytes.NewBuffer([]byte(content))
-	s.schema = &sqlmapper.Schema{}
+	s.schema = &sqlmapper.Schema{SourceDialect: sqlmapper.SQLite}
 
 	// Splitting on every semicolon cut a trigger body at its first inner
 	// statement: the trigger was still registered, but its body arrived empty.
@@ -408,6 +410,12 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 		}
 	}
 
+	// Routines come after everything they can refer to.
+	if routines := s.generateRoutinesSQL(schema); routines != "" {
+		s.buf.WriteString("\n")
+		s.buf.WriteString(routines)
+	}
+
 	return s.buf.String(), nil
 }
 
@@ -696,4 +704,41 @@ func splitTopLevelCommas(body []byte) [][]byte {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// generateRoutinesSQL renders the routine section of a dump.
+//
+// SQLite has triggers and nothing else: no stored functions, no procedures.
+// Whatever the source defined is kept as a comment rather than dropped, so the
+// reader knows what did not come across.
+func (s *SQLite) generateRoutinesSQL(schema *sqlmapper.Schema) string {
+	if routine.Count(schema) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	if schema.RoutinesAreNativeTo(sqlmapper.SQLite) {
+		for _, tr := range schema.Triggers {
+			stmt := sqlfmt.TriggerHeader(tr.Name, tr.Timing, tr.Event, tr.Table, tr.ForEachRow)
+			if tr.Condition != "" {
+				stmt += "\nWHEN " + tr.Condition
+			}
+			stmt += "\n" + sqlfmt.BlockBody(tr.Body)
+			sb.WriteString(sqlfmt.Terminate(stmt, ";"))
+			sb.WriteString("\n\n")
+		}
+	} else if len(schema.Triggers) > 0 {
+		sb.WriteString(routine.ForeignSQL(&sqlmapper.Schema{
+			SourceDialect: schema.SourceDialect,
+			Triggers:      schema.Triggers,
+		}))
+	}
+
+	if len(schema.Functions) > 0 || len(schema.Procedures) > 0 {
+		sb.WriteString(routine.UnsupportedSQL(schema,
+			"SQLite has no stored functions or procedures. This came from the source and is left commented out."))
+	}
+
+	return sb.String()
 }

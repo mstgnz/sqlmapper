@@ -152,3 +152,14 @@ func TestIsJSONEmulationCheck(t *testing.T) {
 	assert.False(t, IsJSONEmulationCheck("json_validated = 1"),
 		"a column that merely starts with the same letters is not the guard")
 }
+
+func TestRoutinesAreNativeTo(t *testing.T) {
+	parsed := &Schema{SourceDialect: MySQL}
+	assert.True(t, parsed.RoutinesAreNativeTo(MySQL))
+	assert.False(t, parsed.RoutinesAreNativeTo(PostgreSQL))
+
+	// A schema assembled in Go is taken at face value rather than commented out.
+	handBuilt := &Schema{}
+	assert.True(t, handBuilt.RoutinesAreNativeTo(MySQL))
+	assert.True(t, handBuilt.RoutinesAreNativeTo(Oracle))
+}

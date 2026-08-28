@@ -11,6 +11,8 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
+	"github.com/mstgnz/sqlmapper/internal/routine"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 )
 
 // toMySQLType maps any source database type (MySQL or PostgreSQL) to the MySQL equivalent.
@@ -77,19 +79,36 @@ var toMySQLType = map[string]string{
 
 // Package-level compiled regexes for performance.
 var (
-	mysqlCommentRe      = regexp.MustCompile(`(?m)--.*$|#.*$`)
-	mysqlDelimiterRe    = regexp.MustCompile(`(?i)DELIMITER\s+[^\s]+`)
-	mysqlWhitespaceRe   = regexp.MustCompile(`\s+`)
-	mysqlConditionalRe  = regexp.MustCompile(`(?s)/\*!.*?\*/`) // /*!40101 SET ... */
-	mysqlBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)  // /* regular block comments */
+	mysqlCommentRe    = regexp.MustCompile(`(?m)--.*$|#.*$`)
+	mysqlDelimiterRe  = regexp.MustCompile(`(?i)DELIMITER\s+[^\s]+`)
+	mysqlWhitespaceRe = regexp.MustCompile(`\s+`)
+	// A /*! ... */ block is not a comment: MySQL executes what is inside it when
+	// the server is new enough, and mysqldump wraps every routine in one. This
+	// keeps the contents and drops only the wrapper. Stripping the block whole
+	// deleted every trigger, function and procedure a real dump contained.
+	mysqlConditionalRe  = regexp.MustCompile(`(?s)/\*!\d*(.*?)\*/`)
+	mysqlBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`) // /* regular block comments */
 	mysqlLockRe         = regexp.MustCompile(`(?i)LOCK\s+TABLES\s+[^;]+;`)
 	mysqlUnlockRe       = regexp.MustCompile(`(?i)UNLOCK\s+TABLES\s*;`)
 	mysqlDBRe           = regexp.MustCompile(`(?i)CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)`)
 	mysqlIndexRe        = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?(?:FULLTEXT\s+)?INDEX\s+(\w+)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)`)
-	mysqlViewRe         = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+` + "`?" + `([\w.]+)` + "`?" + `\s+AS\s+(.*?);`)
-	mysqlFuncRe         = regexp.MustCompile(`(?i)CREATE\s+FUNCTION\s+([\w.]+)\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+BEGIN\s+(.*?)\s+END`)
-	mysqlProcRe         = regexp.MustCompile(`(?i)CREATE\s+PROCEDURE\s+([\w.]+)\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
-	mysqlTriggerRe      = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
+	// mysqldump writes a view with the attributes it was created with, each in
+	// its own version block:
+	//
+	//	/*!50001 CREATE ALGORITHM=UNDEFINED */
+	//	/*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */
+	//	/*!50001 VIEW `v` AS select ... */;
+	//
+	// so everything between CREATE and VIEW is optional.
+	mysqlViewRe = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?` +
+		`(?:\s+ALGORITHM\s*=\s*\S+)?(?:\s+DEFINER\s*=\s*\S+)?(?:\s+SQL\s+SECURITY\s+\w+)?` +
+		`\s+VIEW\s+` + "`?" + `([\w.]+)` + "`?" + `\s+AS\s+(.*?);`)
+	// mysqldump writes a routine with a DEFINER clause and backtick-quoted
+	// names, so both are optional here. Without them a dumped trigger was read
+	// as no trigger at all.
+	mysqlFuncRe         = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefiner + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+BEGIN\s+(.*?)\s+END`)
+	mysqlProcRe         = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerProc + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
+	mysqlTriggerRe      = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerTrigger + "`?" + `([\w.]+)` + "`?" + `\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
 	mysqlGrantRe        = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+([\w.*]+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
 	mysqlGrantProcRe    = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:PROCEDURE|FUNCTION)\s+(\w+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
 	mysqlRevokeRe       = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+([\w.*]+)\s+FROM\s+'([^']+)'@'([^']+)';`)
@@ -190,7 +209,7 @@ type MySQL struct {
 // NewMySQL creates and initializes a new MySQL parser instance.
 func NewMySQL() sqlmapper.Database {
 	return &MySQL{
-		schema: &sqlmapper.Schema{},
+		schema: &sqlmapper.Schema{SourceDialect: sqlmapper.MySQL},
 	}
 }
 
@@ -272,6 +291,12 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString("\n")
 	}
 
+	// Routines come after everything they can refer to.
+	if routines := m.generateRoutinesSQL(schema); routines != "" {
+		result.WriteString("\n")
+		result.WriteString(routines)
+	}
+
 	return result.String(), nil
 }
 
@@ -287,8 +312,8 @@ func (m *MySQL) generateViewSQL(view sqlmapper.View) string {
 // normalizeContent preprocesses SQL by removing comments, DELIMITER statements,
 // backtick quoting, and normalizing whitespace.
 func (m *MySQL) normalizeContent(content string) string {
-	// Strip mysqldump conditional comments first (/*!40101 SET ... */)
-	content = mysqlConditionalRe.ReplaceAllString(content, "")
+	// Unwrap mysqldump conditional blocks, keeping the SQL inside them.
+	content = mysqlConditionalRe.ReplaceAllString(content, " $1 ")
 	// Strip regular block comments
 	content = mysqlBlockCommentRe.ReplaceAllString(content, "")
 	// Strip line comments (-- and #)
@@ -311,6 +336,15 @@ func (m *MySQL) parseSchemas(content string) error {
 	}
 	return nil
 }
+
+// mysqlDefiner and its siblings match the optional DEFINER clause mysqldump
+// writes between CREATE and the object keyword, together with that keyword.
+const (
+	definerClause       = `(?:DEFINER\s*=\s*\S+\s+)?`
+	mysqlDefiner        = definerClause + `FUNCTION\s+`
+	mysqlDefinerProc    = definerClause + `PROCEDURE\s+`
+	mysqlDefinerTrigger = definerClause + `TRIGGER\s+`
+)
 
 var mysqlCreateTableRe = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w.]+)\s*\(`)
 
@@ -696,9 +730,26 @@ func (m *MySQL) parseViews(content string) error {
 		} else {
 			view.Name = match[1]
 		}
+		// mysqldump writes each view twice: a stand-in of SELECT 1 AS col early
+		// on, so that anything referring to it can be created, and the real
+		// definition at the end. The last one wins, which is how the file is
+		// meant to be replayed.
+		if i := indexOfView(m.schema.Views, view.Schema, view.Name); i != -1 {
+			m.schema.Views[i] = view
+			continue
+		}
 		m.schema.Views = append(m.schema.Views, view)
 	}
 	return nil
+}
+
+func indexOfView(views []sqlmapper.View, schema, name string) int {
+	for i, v := range views {
+		if v.Name == name && v.Schema == schema {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m *MySQL) parseFunctions(content string) error {
@@ -1094,4 +1145,62 @@ func isNumeric(s string) bool {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// routines returns the schema's functions, procedures and triggers as complete
+// MySQL statements, in the order the server needs to see them.
+func (m *MySQL) routines(schema *sqlmapper.Schema) []string {
+	var out []string
+
+	for _, fn := range schema.Functions {
+		kw, tail := "FUNCTION", " RETURNS "+fn.Returns
+		if fn.IsProc {
+			kw, tail = "PROCEDURE", ""
+		}
+		out = append(out, fmt.Sprintf("CREATE %s %s(%s)%s\n%s",
+			kw, fn.Name, routine.Params(fn.Parameters), tail, strings.TrimSpace(fn.Body)))
+	}
+
+	for _, pr := range schema.Procedures {
+		out = append(out, fmt.Sprintf("CREATE PROCEDURE %s(%s)\n%s",
+			pr.Name, routine.Params(pr.Parameters), strings.TrimSpace(pr.Body)))
+	}
+
+	for _, tr := range schema.Triggers {
+		// MySQL has no statement-level triggers: FOR EACH ROW is required, and
+		// leaving it out produced a statement the server rejects outright.
+		header := sqlfmt.TriggerHeader(tr.Name, tr.Timing, tr.Event, tr.Table, true)
+		// The parser captures what is between BEGIN and END, so they have to be
+		// put back: without them the server runs only the first statement.
+		out = append(out, sqlfmt.SourceRoutineSQL(header, sqlfmt.BlockBody(tr.Body)))
+	}
+
+	return out
+}
+
+// generateRoutinesSQL renders the routine section of a dump.
+//
+// Generate and GenerateStream both call it because they used to disagree: the
+// file path dropped every routine, and the stream path wrote one MySQL could
+// not load, having neither FOR EACH ROW nor the DELIMITER block that keeps the
+// body's own semicolons from ending the statement.
+func (m *MySQL) generateRoutinesSQL(schema *sqlmapper.Schema) string {
+	if routine.Count(schema) == 0 {
+		return ""
+	}
+	if !schema.RoutinesAreNativeTo(sqlmapper.MySQL) {
+		return routine.ForeignSQL(schema)
+	}
+
+	// The bodies carry semicolons, so the terminator has to change around them,
+	// exactly as mysqldump writes it.
+	var sb strings.Builder
+	sb.WriteString("DELIMITER ;;\n\n")
+	for _, stmt := range m.routines(schema) {
+		sb.WriteString(sqlfmt.Terminate(stmt, " ;;"))
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("DELIMITER ;\n\n")
+
+	return sb.String()
 }

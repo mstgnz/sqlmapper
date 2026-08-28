@@ -45,7 +45,9 @@ The parsers are regular-expression based rather than a full SQL grammar. The usu
 
 ### The output is missing objects
 
-`Generate` emits tables, columns, constraints, indexes and views. Functions, procedures and triggers are parsed into the schema but not written out, because their bodies are procedural code rather than DDL. Table data is not carried across at all. See [what is not converted](../README.md#what-is-not-converted).
+`Generate` emits tables, columns, constraints, indexes, views and routines. A function, procedure or trigger whose body came from a different database is written out commented, because the body is procedural code and is not translated; converting a database to itself leaves its routines executable. Table data is not carried across at all. See [what is not converted](../README.md#what-is-not-converted).
+
+If a routine is missing entirely rather than commented, the dump wrote it in a form the parser did not recognise. Reduce the dump to that statement and open an issue with it.
 
 ### An expression came out unchanged when it should have been translated
 

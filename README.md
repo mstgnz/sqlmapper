@@ -149,7 +149,7 @@ Type mapping is dialect-aware, not a lookup table with a default. Some cases it 
 
 Be aware of these before you trust the output:
 
-- **Function, procedure and trigger bodies.** They are parsed into the schema but not translated, because they are procedural code, not DDL. PL/pgSQL and MySQL's `BEGIN ... END` are different languages.
+- **Function, procedure and trigger bodies.** They are procedural code, not DDL, and PL/pgSQL and MySQL's `BEGIN ... END` are different languages, so a body is never rewritten. Converting a database to itself keeps its routines executable; converting to a different one writes each routine out commented, with a note saying where it came from. The output still loads, and nothing is lost silently.
 - **Most of a view body.** The `CREATE VIEW` wrapper and the `WHERE` clause are converted; the select list, the joins and anything else are copied verbatim. A view that calls dialect-specific functions outside the `WHERE` clause will need editing.
 - **Table data.** `INSERT` statements and `COPY` blocks are skipped. This is a schema tool.
 - **Storage and tuning clauses.** Tablespaces, storage parameters, partitioning and engine options survive only where the target has an equivalent.
@@ -198,6 +198,20 @@ this matrix rather than by reading documentation:
 - A PostgreSQL view body says `WHERE is_active`, which Oracle 21 and SQL Server
   reject because they have no boolean type. Expressions are parsed rather than
   copied, so that becomes `WHERE is_active <> 0` on the way out.
+- `mysqldump` wraps its routines, and the real body of every view, in
+  `/*!50003 ... */` version blocks. Those are not comments: MySQL runs what is
+  inside them. It also writes each view twice, a stand-in of `SELECT 1 AS col`
+  first so that anything referring to it can be created, then the real
+  definition at the end, and the last one is the one that counts.
+- `pg_dump` puts a function's attributes between `RETURNS` and the body,
+  `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ ... $$`, where
+  hand-written SQL usually puts `LANGUAGE` after it.
+
+Routines were verified the same way: a trigger taken out of MySQL 8.4 and a
+trigger plus its function taken out of PostgreSQL 17, converted back to their
+own dialect, loaded into a fresh database and then fired by an `INSERT` to
+confirm they still run. Converted to a different dialect, the same routines come
+out commented and the file still loads.
 
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and
@@ -228,7 +242,7 @@ that converted before this existed still converts.
 
 What is _not_ parsed: the rest of a view body, and function, procedure and
 trigger bodies. Those are statements and procedural code rather than
-expressions, and they are still copied verbatim.
+expressions, and they are carried over as they were written.
 
 ## Type mapping choices
 

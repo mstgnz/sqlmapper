@@ -11,6 +11,8 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
+	"github.com/mstgnz/sqlmapper/internal/routine"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 )
 
 // toPostgresType maps any source database type (MySQL or PostgreSQL) to the PostgreSQL equivalent.
@@ -109,14 +111,30 @@ var (
 	pgIndexRe            = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(\w+)\s+ON\s+([\w.]+)\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)(?:\s+WHERE\s+(.+?))?(?:\s+TABLESPACE\s+(\w+))?\s*;`)
 	pgViewRe             = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+([\w.]+)\s+AS\s+(.*?);`)
 	pgMatViewRe          = regexp.MustCompile(`(?i)CREATE\s+MATERIALIZED\s+VIEW\s+([\w.]+)(?:\s+WITH\s*\([^)]*\))?\s+AS\s+(.*?)\s+WITH\s+(?:NO\s+)?DATA\s*;`)
-	pgFuncRe             = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+([\w.]+)\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+AS\s+\$\$(.*?)\$\$\s+LANGUAGE\s+(\w+)`)
-	pgProcRe             = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+PROCEDURE\s+([\w.]+)\s*\((.*?)\)\s+LANGUAGE\s+(\w+)\s+AS\s+\$\$(.*?)\$\$`)
-	pgTriggerRe          = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(INSERT|UPDATE|DELETE)\s+ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
-	pgCondTrigRe         = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(?:UPDATE\s+OF\s+[\w.]+\s+)?ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?WHEN\s+\((.+?)\)\s+EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
-	pgGrantRe            = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgGrantAllRe         = regexp.MustCompile(`(?i)GRANT\s+ALL\s+PRIVILEGES\s+ON\s+(?:ALL\s+TABLES\s+IN\s+SCHEMA\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgGrantExecRe        = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)\s*\([^)]*\)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgRevokeRe           = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+FROM\s+(\w+)\s*;`)
+	// pg_dump writes the attributes between RETURNS and the body:
+	//
+	//	CREATE FUNCTION public.touch() RETURNS trigger
+	//	    LANGUAGE plpgsql
+	//	    AS $$ ... $$;
+	//
+	// while hand-written SQL usually puts LANGUAGE after it. Insisting on one
+	// order meant no function in a real dump was found at all, so what is
+	// between them is captured and read afterwards.
+	pgFuncRe = regexp.MustCompile(`(?is)CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+([\w."]+)\s*\((.*?)\)\s+RETURNS\s+`)
+
+	// pgFuncAttrRe finds an attribute wherever the writer put it.
+	pgLanguageRe = regexp.MustCompile(`(?i)\bLANGUAGE\s+(\w+)`)
+
+	// pgReturnStopRe marks where the return type ends and the function's
+	// attributes begin.
+	pgReturnStopRe = regexp.MustCompile(`(?is)\s+(?:LANGUAGE|AS|SET|SECURITY|STABLE|IMMUTABLE|VOLATILE|STRICT|PARALLEL|COST|ROWS|WINDOW|LEAKPROOF|CALLED|RETURNS)\b`)
+	pgProcRe       = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+PROCEDURE\s+([\w.]+)\s*\((.*?)\)\s+LANGUAGE\s+(\w+)\s+AS\s+\$\$(.*?)\$\$`)
+	pgTriggerRe    = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(INSERT|UPDATE|DELETE)\s+ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
+	pgCondTrigRe   = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(?:UPDATE\s+OF\s+[\w.]+\s+)?ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?WHEN\s+\((.+?)\)\s+EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
+	pgGrantRe      = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgGrantAllRe   = regexp.MustCompile(`(?i)GRANT\s+ALL\s+PRIVILEGES\s+ON\s+(?:ALL\s+TABLES\s+IN\s+SCHEMA\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgGrantExecRe  = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)\s*\([^)]*\)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgRevokeRe     = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+FROM\s+(\w+)\s*;`)
 
 	pgTableCommentRe = regexp.MustCompile(`(?i)COMMENT\s+ON\s+TABLE\s+([\w.]+)\s+IS\s+'([^']+)'\s*;`)
 	pgColCommentRe   = regexp.MustCompile(`(?i)COMMENT\s+ON\s+COLUMN\s+([\w.]+)\.(\w+)\s+IS\s+'([^']+)'\s*;`)
@@ -137,7 +155,7 @@ type PostgreSQL struct {
 // NewPostgreSQL creates and initializes a new PostgreSQL parser instance.
 func NewPostgreSQL() sqlmapper.Database {
 	return &PostgreSQL{
-		schema: &sqlmapper.Schema{},
+		schema: &sqlmapper.Schema{SourceDialect: sqlmapper.PostgreSQL},
 	}
 }
 
@@ -241,6 +259,12 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	for _, view := range schema.Views {
 		result.WriteString(p.generateViewSQL(view))
 		result.WriteString("\n")
+	}
+
+	// Routines come after everything they can refer to.
+	if routines := p.generateRoutinesSQL(schema); routines != "" {
+		result.WriteString("\n")
+		result.WriteString(routines)
 	}
 
 	return result.String(), nil
@@ -990,20 +1014,84 @@ func (p *PostgreSQL) parseViews(content string) error {
 	return nil
 }
 
+// pgDollarBody splits what follows RETURNS into the attributes before the body,
+// the body itself, and the attributes after it.
+//
+// The tag is matched by hand rather than by regexp: Go's engine has no
+// backreferences, so $function$ ... $function$ cannot be expressed as a
+// pattern, and pg_dump reaches for a tag whenever the body contains $$.
+func pgDollarBody(rest string) (body, before, after string, ok bool) {
+	open := strings.Index(rest, "$")
+	if open == -1 {
+		return "", "", "", false
+	}
+	close := strings.Index(rest[open+1:], "$")
+	if close == -1 {
+		return "", "", "", false
+	}
+	tag := rest[open : open+close+2]
+	if strings.ContainsAny(tag[1:len(tag)-1], " \t\n") {
+		return "", "", "", false
+	}
+
+	bodyStart := open + len(tag)
+	end := strings.Index(rest[bodyStart:], tag)
+	if end == -1 {
+		return "", "", "", false
+	}
+
+	before = rest[:open]
+	body = rest[bodyStart : bodyStart+end]
+	after = rest[bodyStart+end+len(tag):]
+	if i := strings.Index(after, ";"); i != -1 {
+		after = after[:i]
+	}
+	return body, before, after, true
+}
+
+// pgReturnType takes the declared type off the front of what follows RETURNS,
+// leaving the attributes behind.
+func pgReturnType(rest string) string {
+	if loc := pgReturnStopRe.FindStringIndex(rest); loc != nil {
+		rest = rest[:loc[0]]
+	}
+	return strings.Join(strings.Fields(rest), " ")
+}
+
+// pgLanguageOf reads the language out of a function's attributes, defaulting to
+// the one PostgreSQL assumes for a body it cannot otherwise place.
+func pgLanguageOf(attrs string) string {
+	if m := pgLanguageRe.FindStringSubmatch(attrs); len(m) > 1 {
+		return m[1]
+	}
+	return "plpgsql"
+}
+
 func (p *PostgreSQL) parseFunctions(content string) error {
-	for _, m := range pgFuncRe.FindAllStringSubmatch(content, -1) {
-		if len(m) < 6 {
+	for _, loc := range pgFuncRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[loc[2]:loc[3]]
+		params := content[loc[4]:loc[5]]
+
+		body, before, after, ok := pgDollarBody(content[loc[1]:])
+		if !ok {
+			// A function with no dollar-quoted body is one this parser cannot
+			// read; skipping it is better than recording an empty one.
 			continue
 		}
-		fn := sqlmapper.Function{Returns: m[3], Body: m[4], Language: m[5]}
-		if parts := strings.Split(m[1], "."); len(parts) > 1 {
+
+		fn := sqlmapper.Function{
+			Returns:  pgReturnType(before),
+			Body:     body,
+			Language: pgLanguageOf(before + " " + after),
+		}
+		if parts := strings.Split(strings.Trim(name, `"`), "."); len(parts) > 1 {
 			fn.Schema = parts[0]
 			fn.Name = parts[1]
 		} else {
-			fn.Name = m[1]
+			fn.Name = name
 		}
-		if m[2] != "" {
-			for _, param := range strings.Split(m[2], ",") {
+		if params != "" {
+			for _, param := range strings.Split(params, ",") {
 				pp := strings.Fields(strings.TrimSpace(param))
 				if len(pp) >= 2 {
 					fn.Parameters = append(fn.Parameters, sqlmapper.Parameter{Name: pp[0], DataType: pp[1]})
@@ -1442,4 +1530,89 @@ func isNumeric(s string) bool {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// routines returns the schema's functions, procedures and triggers as complete
+// PostgreSQL statements.
+func (p *PostgreSQL) routines(schema *sqlmapper.Schema) []string {
+	var out []string
+
+	for _, fn := range schema.Functions {
+		if fn.IsProc {
+			out = append(out, fmt.Sprintf("CREATE PROCEDURE %s(%s) LANGUAGE %s AS $$%s$$",
+				fn.Name, routine.Params(fn.Parameters), pgLanguage(fn.Language), pgBody(fn.Body)))
+			continue
+		}
+		out = append(out, fmt.Sprintf("CREATE FUNCTION %s(%s) RETURNS %s AS $$%s$$ LANGUAGE %s",
+			fn.Name, routine.Params(fn.Parameters), fn.Returns, pgBody(fn.Body), pgLanguage(fn.Language)))
+	}
+
+	for _, pr := range schema.Procedures {
+		out = append(out, fmt.Sprintf("CREATE PROCEDURE %s(%s) LANGUAGE %s AS $$%s$$",
+			pr.Name, routine.Params(pr.Parameters), pgLanguage(pr.Language), pgBody(pr.Body)))
+	}
+
+	for _, tr := range schema.Triggers {
+		// A PostgreSQL trigger runs a function rather than carrying a body, and
+		// the parser records that function's name in the body field. Rendering
+		// it as anything else produced EXECUTE FUNCTION BEGIN.
+		stmt := sqlfmt.TriggerHeader(tr.Name, tr.Timing, tr.Event, tr.Table, tr.ForEachRow)
+		if tr.Condition != "" {
+			stmt += "\nWHEN " + tr.Condition
+		}
+		out = append(out, fmt.Sprintf("%s\nEXECUTE FUNCTION %s()", stmt, pgTriggerFunction(tr.Body)))
+	}
+
+	return out
+}
+
+// pgLanguage supplies the language a function is written in. Emitting the empty
+// string produced "LANGUAGE ;", which no server accepts.
+func pgLanguage(lang string) string {
+	if strings.TrimSpace(lang) == "" {
+		return "plpgsql"
+	}
+	return lang
+}
+
+// pgBody pads the body so the dollar quotes do not run into it.
+func pgBody(body string) string {
+	return "\n" + strings.TrimSpace(body) + "\n"
+}
+
+// pgTriggerFunction takes the function name out of the body field, tolerating a
+// value that already carries its parentheses.
+//
+// The schema qualifier is dropped because the function itself is written out
+// unqualified. Keeping it worked only while that schema happened to be public;
+// a trigger from any other schema called a function that was never created
+// there.
+func pgTriggerFunction(body string) string {
+	name := strings.TrimSpace(body)
+	if i := strings.Index(name, "("); i > 0 {
+		name = name[:i]
+	}
+	if i := strings.LastIndex(name, "."); i != -1 {
+		name = name[i+1:]
+	}
+	return strings.TrimSpace(name)
+}
+
+// generateRoutinesSQL renders the routine section of a dump. Generate and
+// GenerateStream both call it, because they used to disagree about whether
+// routines were written at all.
+func (p *PostgreSQL) generateRoutinesSQL(schema *sqlmapper.Schema) string {
+	if routine.Count(schema) == 0 {
+		return ""
+	}
+	if !schema.RoutinesAreNativeTo(sqlmapper.PostgreSQL) {
+		return routine.ForeignSQL(schema)
+	}
+
+	var sb strings.Builder
+	for _, stmt := range p.routines(schema) {
+		sb.WriteString(sqlfmt.Terminate(stmt, ";"))
+		sb.WriteString("\n\n")
+	}
+	return sb.String()
 }

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/routine"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
@@ -197,7 +199,7 @@ type Oracle struct {
 // It returns a parser that can handle Oracle specific SQL syntax and schema structures.
 func NewOracle() sqlmapper.Database {
 	return &Oracle{
-		schema: &sqlmapper.Schema{},
+		schema: &sqlmapper.Schema{SourceDialect: sqlmapper.Oracle},
 	}
 }
 
@@ -716,25 +718,10 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 			view.Name, expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.Oracle))
 	}
 
-	// Create triggers
-	for _, trigger := range schema.Triggers {
-		result.WriteString(fmt.Sprintf("CREATE OR REPLACE TRIGGER %s\n", trigger.Name))
-		if trigger.Timing != "" {
-			result.WriteString(trigger.Timing + " ")
-		}
-		if trigger.Event != "" {
-			result.WriteString(trigger.Event + " ")
-		}
-		if trigger.Table != "" {
-			result.WriteString("ON " + trigger.Table + " ")
-		}
-		if trigger.ForEachRow {
-			result.WriteString("FOR EACH ROW\n")
-		}
-		if trigger.Body != "" {
-			result.WriteString(trigger.Body)
-		}
-		result.WriteString("\n/\n\n")
+	// Routines come after everything they can refer to. This used to write
+	// triggers only, and wrote a foreign body as if it were PL/SQL.
+	if routines := o.generateRoutinesSQL(schema); routines != "" {
+		result.WriteString(routines)
 	}
 
 	return result.String(), nil
@@ -1368,4 +1355,48 @@ func splitTopLevelCommas(body string) []string {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// generateRoutinesSQL renders the routine section of a dump.
+//
+// A PL/SQL block ends at a slash on its own line, not at the semicolon that
+// closes its last statement, which is why every routine here is followed by
+// one.
+func (o *Oracle) generateRoutinesSQL(schema *sqlmapper.Schema) string {
+	if routine.Count(schema) == 0 {
+		return ""
+	}
+	if !schema.RoutinesAreNativeTo(sqlmapper.Oracle) {
+		return routine.ForeignSQL(schema)
+	}
+
+	var stmts []string
+
+	for _, fn := range schema.Functions {
+		if fn.IsProc {
+			stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE PROCEDURE %s(%s)\n%s",
+				fn.Name, routine.Params(fn.Parameters), strings.TrimSpace(fn.Body)))
+			continue
+		}
+		stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE FUNCTION %s(%s) RETURN %s\n%s",
+			fn.Name, routine.Params(fn.Parameters), fn.Returns, strings.TrimSpace(fn.Body)))
+	}
+
+	for _, pr := range schema.Procedures {
+		stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE PROCEDURE %s(%s)\n%s",
+			pr.Name, routine.Params(pr.Parameters), strings.TrimSpace(pr.Body)))
+	}
+
+	for _, tr := range schema.Triggers {
+		header := "CREATE OR REPLACE " + strings.TrimPrefix(
+			sqlfmt.TriggerHeader(tr.Name, tr.Timing, tr.Event, tr.Table, tr.ForEachRow), "CREATE ")
+		stmts = append(stmts, sqlfmt.SourceRoutineSQL(header, tr.Body))
+	}
+
+	var sb strings.Builder
+	for _, stmt := range stmts {
+		sb.WriteString(sqlfmt.Terminate(stmt, ";"))
+		sb.WriteString("\n/\n\n")
+	}
+	return sb.String()
 }

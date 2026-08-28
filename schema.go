@@ -21,6 +21,16 @@ const (
 
 // Schema represents a database schema
 type Schema struct {
+	// SourceDialect names the database the schema was parsed from. Parse sets
+	// it; a schema built by hand leaves it empty.
+	//
+	// It exists so a generator can tell its own routines from someone else's.
+	// A function or trigger body is procedural code, not DDL, and is carried
+	// across verbatim: emitting a MySQL body into PostgreSQL produces a file
+	// that fails to load. An empty value is treated as native, so a schema
+	// assembled in Go is written out as the caller wrote it.
+	SourceDialect DatabaseType
+
 	Name             string
 	Tables           []Table
 	Procedures       []Procedure
@@ -39,6 +49,18 @@ type Schema struct {
 	Clusters         []Cluster
 	MaterializedLogs []MaterializedViewLog
 	Types            []Type
+}
+
+// RoutinesAreNativeTo reports whether the schema's functions, procedures and
+// triggers came from the given dialect, so their bodies can be written out as
+// they stand.
+//
+// A body is procedural code and is carried across verbatim, so emitting one
+// into a different database produces a file that fails to load. A schema with
+// no source dialect was built by the caller rather than parsed, and is taken at
+// face value.
+func (s *Schema) RoutinesAreNativeTo(dialect DatabaseType) bool {
+	return s.SourceDialect == "" || s.SourceDialect == dialect
 }
 
 // Table represents a database table

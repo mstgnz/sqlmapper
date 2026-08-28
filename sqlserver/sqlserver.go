@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
@@ -142,7 +143,7 @@ type SQLServer struct {
 // It returns a parser that can handle SQL Server specific SQL syntax and schema structures.
 func NewSQLServer() sqlmapper.Database {
 	return &SQLServer{
-		schema: &sqlmapper.Schema{},
+		schema: &sqlmapper.Schema{SourceDialect: sqlmapper.SQLServer},
 		buf:    bytes.NewBuffer(nil),
 	}
 }
@@ -884,6 +885,12 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 		fmt.Fprintf(s.buf, "CREATE VIEW %s AS %s;\nGO\n", view.Name, body)
 	}
 
+	// Routines come after everything they can refer to.
+	if routines := s.generateRoutinesSQL(schema); routines != "" {
+		s.buf.WriteString("\n")
+		s.buf.WriteString(routines)
+	}
+
 	return s.buf.String(), nil
 }
 
@@ -1319,4 +1326,59 @@ func stripSQLComments(content string) string {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// generateRoutinesSQL renders the routine section of a dump. Batches are
+// separated by GO, which is what the client splits on; the semicolon inside a
+// body does not end the batch.
+func (s *SQLServer) generateRoutinesSQL(schema *sqlmapper.Schema) string {
+	if routine.Count(schema) == 0 {
+		return ""
+	}
+	if !schema.RoutinesAreNativeTo(sqlmapper.SQLServer) {
+		return routine.ForeignSQL(schema)
+	}
+
+	var stmts []string
+
+	for _, fn := range schema.Functions {
+		if fn.IsProc {
+			stmts = append(stmts, fmt.Sprintf("CREATE PROCEDURE %s%s\nAS\n%s",
+				fn.Name, mssParams(fn.Parameters), strings.TrimSpace(fn.Body)))
+			continue
+		}
+		stmts = append(stmts, fmt.Sprintf("CREATE FUNCTION %s%s\nRETURNS %s\nAS\n%s",
+			fn.Name, mssParams(fn.Parameters), fn.Returns, strings.TrimSpace(fn.Body)))
+	}
+
+	for _, pr := range schema.Procedures {
+		stmts = append(stmts, fmt.Sprintf("CREATE PROCEDURE %s%s\nAS\n%s",
+			pr.Name, mssParams(pr.Parameters), strings.TrimSpace(pr.Body)))
+	}
+
+	for _, tr := range schema.Triggers {
+		stmts = append(stmts, fmt.Sprintf("CREATE TRIGGER %s ON %s\n%s %s\nAS\n%s",
+			tr.Name, tr.Table, tr.Timing, tr.Event, strings.TrimSpace(tr.Body)))
+	}
+
+	var sb strings.Builder
+	for _, stmt := range stmts {
+		sb.WriteString(strings.TrimRight(stmt, " \n"))
+		sb.WriteString("\nGO\n\n")
+	}
+	return sb.String()
+}
+
+// mssParams renders a parameter list with the @ every T-SQL parameter carries.
+// An empty list is written as nothing at all, which is how a procedure with no
+// parameters is declared.
+func mssParams(params []sqlmapper.Parameter) string {
+	if len(params) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		parts = append(parts, "@"+strings.TrimPrefix(p.Name, "@")+" "+p.DataType)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
 }

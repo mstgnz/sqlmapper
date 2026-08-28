@@ -49,8 +49,11 @@ expression the parser cannot read is passed through unchanged.
 
 # What is not converted
 
-Function, procedure and trigger bodies are parsed into the schema but are not
-translated, because their contents are procedural code rather than DDL. The
+Function, procedure and trigger bodies are not translated, because their
+contents are procedural code rather than DDL. Converting a database to itself
+keeps its routines executable; converting to a different one writes each routine
+out commented, naming the source it came from, so the output still loads and
+nothing goes missing without a trace. The
 parts of a view body outside the WHERE clause are carried over verbatim, so a
 view written against dialect-specific functions may need editing by hand. Table
 data (INSERT statements) is not carried across.

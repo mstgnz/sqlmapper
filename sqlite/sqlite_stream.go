@@ -9,6 +9,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -248,14 +249,14 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// Write tables
 	for _, table := range schema.Tables {
 		stmt := p.sqlite.generateTableSQL(table)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
 			stmt := p.sqlite.generateIndexSQL(table.Name, index)
-			if _, err := writer.Write([]byte(stmt + ";\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
 		}
@@ -264,23 +265,15 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// Write views
 	for _, view := range schema.Views {
 		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
 
-	// Write triggers
-	for _, trigger := range schema.Triggers {
-		stmt := fmt.Sprintf("CREATE TRIGGER %s %s %s ON %s\n",
-			trigger.Name, trigger.Timing, trigger.Event, trigger.Table)
-		if trigger.ForEachRow {
-			stmt += "FOR EACH ROW\n"
-		}
-		if trigger.Condition != "" {
-			stmt += "WHEN " + trigger.Condition + "\n"
-		}
-		stmt += fmt.Sprintf("BEGIN\n%s\nEND", trigger.Body)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+	// Routines are rendered by the same code the file generator uses, so the
+	// streamed output and the file output agree.
+	if routines := p.sqlite.generateRoutinesSQL(schema); routines != "" {
+		if _, err := writer.Write([]byte(routines)); err != nil {
 			return err
 		}
 	}

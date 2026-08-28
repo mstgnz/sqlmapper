@@ -9,6 +9,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -526,7 +527,7 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// Write sequences
 	for _, sequence := range schema.Sequences {
 		stmt := p.oracle.generateSequenceSQL(sequence)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
@@ -534,7 +535,7 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// Write types
 	for _, typ := range schema.Types {
 		stmt := p.oracle.generateTypeSQL(typ)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
@@ -545,14 +546,14 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 	for _, table := range tables {
 		stmt := p.oracle.generateTableSQL(table, deferredFKs[table.Name])
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
 			stmt := p.oracle.generateIndexSQL(table.Name, index)
-			if _, err := writer.Write([]byte(stmt + ";\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
 		}
@@ -561,50 +562,15 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// Write views
 	for _, view := range schema.Views {
 		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
 
-	// Write functions
-	for _, function := range schema.Functions {
-		if !function.IsProc {
-			stmt := fmt.Sprintf("CREATE FUNCTION %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(") RETURN %s\n%s", function.Returns, function.Body)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write procedures
-	for _, function := range schema.Functions {
-		if function.IsProc {
-			stmt := fmt.Sprintf("CREATE PROCEDURE %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(")\n%s", function.Body)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write triggers
-	for _, trigger := range schema.Triggers {
-		stmt := fmt.Sprintf("CREATE TRIGGER %s %s %s ON %s\n%s",
-			trigger.Name, trigger.Timing, trigger.Event, trigger.Table, trigger.Body)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+	// Routines are rendered by the same code the file generator uses, and end
+	// with the slash a PL/SQL block needs.
+	if routines := p.oracle.generateRoutinesSQL(schema); routines != "" {
+		if _, err := writer.Write([]byte(routines)); err != nil {
 			return err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -527,7 +528,7 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	// Write types
 	for _, typ := range schema.Types {
 		stmt := p.postgres.generateTypeSQL(typ)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 	}
@@ -538,14 +539,14 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 	for _, table := range tables {
 		stmt := p.postgres.generateTableSQL(table, deferredFKs[table.Name])
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
 			stmt := p.postgres.generateIndexSQL(table.Name, index)
-			if _, err := writer.Write([]byte(stmt + ";\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
 		}
@@ -565,65 +566,22 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	for _, view := range schema.Views {
 		if view.IsMaterialized {
 			stmt := fmt.Sprintf("CREATE MATERIALIZED VIEW %s AS %s", view.Name, view.Definition)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 				return err
 			}
 		} else {
 			stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 				return err
 			}
 		}
 	}
 
-	// Write functions
-	for _, function := range schema.Functions {
-		if !function.IsProc {
-			stmt := fmt.Sprintf("CREATE FUNCTION %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(") RETURNS %s AS $$\n%s\n$$ LANGUAGE %s",
-				function.Returns, function.Body, function.Language)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write procedures
-	for _, function := range schema.Functions {
-		if function.IsProc {
-			stmt := fmt.Sprintf("CREATE PROCEDURE %s(", function.Name)
-			for i, param := range function.Parameters {
-				if i > 0 {
-					stmt += ", "
-				}
-				stmt += fmt.Sprintf("%s %s", param.Name, param.DataType)
-			}
-			stmt += fmt.Sprintf(") AS $$\n%s\n$$ LANGUAGE %s",
-				function.Body, function.Language)
-			if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Write triggers
-	for _, trigger := range schema.Triggers {
-		stmt := fmt.Sprintf("CREATE TRIGGER %s %s %s ON %s\n",
-			trigger.Name, trigger.Timing, trigger.Event, trigger.Table)
-		if trigger.ForEachRow {
-			stmt += "FOR EACH ROW\n"
-		}
-		if trigger.Condition != "" {
-			stmt += "WHEN " + trigger.Condition + "\n"
-		}
-		stmt += fmt.Sprintf("EXECUTE FUNCTION %s", trigger.Body)
-		if _, err := writer.Write([]byte(stmt + ";\n\n")); err != nil {
+	// Routines are rendered by the same code the file generator uses. The two
+	// used to disagree: this path spliced a trigger body where a function name
+	// belongs, and the other wrote no routines at all.
+	if routines := p.postgres.generateRoutinesSQL(schema); routines != "" {
+		if _, err := writer.Write([]byte(routines)); err != nil {
 			return err
 		}
 	}

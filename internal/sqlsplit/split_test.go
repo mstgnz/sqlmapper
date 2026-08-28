@@ -341,3 +341,33 @@ CREATE TABLE t (id INT);`
 	require.Len(t, got, 2)
 	assert.Contains(t, got[1], "CREATE TABLE t")
 }
+
+// A MySQL version block is not a comment. mysqldump wraps every routine in one,
+// so a splitter that discards it discards the routine with it.
+func TestMySQLVersionCommentIsSQL(t *testing.T) {
+	const dump = "/*!40101 SET @saved = @@character_set_client */;\n" +
+		"CREATE TABLE users (id INT);\n" +
+		"/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `bump` " +
+		"BEFORE INSERT ON `users` FOR EACH ROW BEGIN\n  SET NEW.n = 1;\nEND */;\n"
+
+	got := all(t, dump, Semicolon)
+	require.Len(t, got, 3)
+
+	assert.Contains(t, got[0], "SET @saved", "the SET inside the block is a statement")
+	assert.Equal(t, "CREATE TABLE users (id INT)", got[1])
+
+	// The wrapper is gone and the trigger is whole.
+	assert.Contains(t, got[2], "TRIGGER `bump`")
+	assert.Contains(t, got[2], "DEFINER=`root`@`localhost`")
+	assert.Contains(t, got[2], "SET NEW.n = 1;", "the body survives the inner semicolon")
+	assert.NotContains(t, got[2], "/*!")
+	assert.NotContains(t, got[2], "*/")
+}
+
+// An ordinary block comment is still a comment.
+func TestOrdinaryBlockCommentIsStillDropped(t *testing.T) {
+	got := all(t, "/* dropped */ CREATE TABLE users (id INT);", Semicolon)
+	require.Len(t, got, 1)
+	assert.NotContains(t, got[0], "dropped")
+	assert.Contains(t, got[0], "CREATE TABLE users")
+}
