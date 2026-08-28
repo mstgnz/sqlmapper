@@ -137,9 +137,12 @@ func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 	table.Name = tableName
 
 	// Extract columns and table options
+	// The two indexes have to be in order as well as present. Checking only
+	// that each was found let a malformed statement, ")(", slice backwards and
+	// take the process down with it.
 	startIdx := bytes.Index(stmt, []byte("("))
 	endIdx := bytes.LastIndex(stmt, []byte(")"))
-	if startIdx == -1 || endIdx == -1 {
+	if startIdx == -1 || endIdx <= startIdx {
 		return table, fmt.Errorf("no columns found in CREATE TABLE statement")
 	}
 
@@ -275,7 +278,7 @@ func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
 // last thing on the line, because the space it found was the one before the
 // value.
 func sqliteDefaultValue(def []byte) string {
-	idx := bytes.Index(bytes.ToUpper(def), []byte("DEFAULT"))
+	idx := bytes.Index(keyword.UpperASCIIBytes(def), []byte("DEFAULT"))
 	if idx == -1 {
 		return ""
 	}
@@ -359,7 +362,7 @@ func (s *SQLite) parseCreateIndex(stmt []byte) error {
 	// Extract columns
 	startIdx := bytes.LastIndex(stmt, []byte("("))
 	endIdx := bytes.LastIndex(stmt, []byte(")"))
-	if startIdx == -1 || endIdx == -1 {
+	if startIdx == -1 || endIdx <= startIdx {
 		return fmt.Errorf("no columns found in CREATE INDEX statement")
 	}
 
@@ -398,7 +401,7 @@ func (s *SQLite) parseCreateView(stmt []byte) (sqlmapper.View, error) {
 	view.Name = viewName
 
 	// Extract view definition
-	if idx := bytes.Index(bytes.ToUpper(stmt), []byte(" AS ")); idx != -1 {
+	if idx := bytes.Index(keyword.UpperASCIIBytes(stmt), []byte(" AS ")); idx != -1 {
 		view.Definition = string(bytes.TrimSpace(stmt[idx+4:]))
 	}
 

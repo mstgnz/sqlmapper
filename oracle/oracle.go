@@ -473,7 +473,7 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 		}
 
 		if strings.Contains(strings.ToUpper(colDef), "DEFAULT") {
-			defaultIdx := strings.Index(strings.ToUpper(colDef), "DEFAULT")
+			defaultIdx := strings.Index(keyword.UpperASCII(colDef), "DEFAULT")
 			// TrimSpace before looking for the terminator: the character right
 			// after DEFAULT is a space, so searching the untrimmed remainder
 			// found index 0 and every default came out empty.
@@ -612,7 +612,7 @@ func (o *Oracle) parseCreateView(stmt string) (sqlmapper.View, error) {
 	}
 
 	// Read the view definition
-	asIndex := strings.Index(strings.ToUpper(stmt), " AS ")
+	asIndex := strings.Index(keyword.UpperASCII(stmt), " AS ")
 	if asIndex != -1 {
 		view.Definition = strings.TrimSpace(stmt[asIndex+4:])
 	}
@@ -686,8 +686,8 @@ func (o *Oracle) parseCreateTrigger(stmt string) (sqlmapper.Trigger, error) {
 	trigger.ForEachRow = strings.Contains(strings.ToUpper(stmt), "FOR EACH ROW")
 
 	// Read the trigger body
-	beginIndex := strings.Index(strings.ToUpper(stmt), "BEGIN")
-	endIndex := strings.LastIndex(strings.ToUpper(stmt), "END")
+	beginIndex := strings.Index(keyword.UpperASCII(stmt), "BEGIN")
+	endIndex := strings.LastIndex(keyword.UpperASCII(stmt), "END")
 	if beginIndex != -1 && endIndex != -1 {
 		trigger.Body = strings.TrimSpace(stmt[beginIndex : endIndex+3])
 	}

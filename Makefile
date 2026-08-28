@@ -12,6 +12,10 @@ LINT_VERSION := v2.13.1
 # enforces it.
 COVERAGE_FLOOR := 85
 
+# How long `make fuzz` looks for a crash. The seed corpus runs on every
+# `make test`; this is for going further.
+FUZZTIME ?= 60s
+
 GO      ?= go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -102,6 +106,11 @@ docker: ## Build the image the release publishes
 tidy: ## Tidy the module and verify the checksums
 	$(GO) mod tidy
 	$(GO) mod verify
+
+.PHONY: fuzz
+fuzz: ## Look for input that makes a parser panic (FUZZTIME=2m to run longer)
+	$(GO) test ./tests/integration/ -run FuzzParseNeverPanics \
+		-fuzz FuzzParseNeverPanics -fuzztime $(FUZZTIME)
 
 .PHONY: bench
 bench: ## Run the benchmarks

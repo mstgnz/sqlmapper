@@ -156,6 +156,8 @@ Be aware of these before you trust the output:
 
 The parsers are regular-expression based rather than a full SQL grammar. They are built against the output of `mysqldump` and `pg_dump`, but unusual syntax can still slip through. **Read the generated SQL before running it on anything you care about.**
 
+A parser may reject anything it cannot read, but it never panics: this is a library, and a panic takes the caller's process down with it. `FuzzParseNeverPanics` holds that line, and `make fuzz` keeps looking for a way past it.
+
 ## Dialect and version coverage
 
 Every cell below was verified by taking a schema out of the source server with

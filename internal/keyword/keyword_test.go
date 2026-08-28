@@ -33,3 +33,30 @@ func TestHasPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestUpperASCII(t *testing.T) {
+	tests := map[string]string{
+		"create table": "CREATE TABLE",
+		"CREATE":       "CREATE",
+		"":             "",
+		"id_1":         "ID_1",
+		// The reason this exists: strings.ToUpper changes the length of some
+		// characters, and an offset found in the folded copy then misses in the
+		// original. This one folds to a different byte length under ToUpper.
+		"ß":          "ß",
+		"aßz":        "AßZ",
+		"0\xfe0 def": "0\xfe0 DEF",
+	}
+
+	for in, want := range tests {
+		if got := UpperASCII(in); got != want {
+			t.Errorf("UpperASCII(%q) = %q, want %q", in, got, want)
+		}
+		if len(UpperASCII(in)) != len(in) {
+			t.Errorf("UpperASCII(%q) changed the length", in)
+		}
+		if got := string(UpperASCIIBytes([]byte(in))); got != want {
+			t.Errorf("UpperASCIIBytes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -45,3 +45,41 @@ func HasPrefixBytes(stmt []byte, kw string) bool {
 func isWordByte(c byte) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
+
+// UpperASCII folds a to z into A to Z and leaves every other byte alone.
+//
+// It exists because strings.ToUpper can change a string's length: some
+// characters have an upper-case form of a different size in UTF-8. A parser
+// that finds a keyword in the folded copy and then slices the original at that
+// offset is reading two different strings, and on a dump carrying any such
+// character the offset lands past the end. SQL keywords are ASCII, so folding
+// only ASCII is both correct here and length-preserving.
+func UpperASCII(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 'a' || c > 'z' {
+			continue
+		}
+		if b == nil {
+			b = []byte(s)
+		}
+		b[i] = c - ('a' - 'A')
+	}
+	if b == nil {
+		return s
+	}
+	return string(b)
+}
+
+// UpperASCIIBytes is UpperASCII for a byte slice. The result is a copy.
+func UpperASCIIBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		out[i] = c
+	}
+	return out
+}

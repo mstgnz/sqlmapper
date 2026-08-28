@@ -622,7 +622,7 @@ func (s *SQLServer) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 	stmt = []byte(normalizeSQLServerDDL(string(stmt)))
 
 	// Extract table name using bytes.Index and bytes.LastIndex
-	startIdx := bytes.Index(bytes.ToUpper(stmt), []byte("TABLE")) + 5
+	startIdx := bytes.Index(keyword.UpperASCIIBytes(stmt), []byte("TABLE")) + 5
 	endIdx := bytes.Index(stmt[startIdx:], []byte("("))
 	if endIdx == -1 {
 		return table, fmt.Errorf("invalid CREATE TABLE statement")
@@ -666,21 +666,25 @@ func (s *SQLServer) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 // parseColumn parses a column definition and returns a Column structure.
 func (s *SQLServer) parseColumn(def []byte) sqlmapper.Column {
 	raw := string(def)
+
+	// IDENTITY(1,1) carries a comma of its own and must come out before the
+	// definition is read, or it splits in the middle. It is stripped first so
+	// that the fields below are the fields of what is left: taking them from
+	// the original text and then slicing the shortened one ran off the end.
+	autoIncrement := mssIdentityRe.MatchString(raw)
+	if autoIncrement {
+		raw = mssIdentityRe.ReplaceAllString(raw, "")
+	}
+
 	parts := strings.Fields(raw)
 	if len(parts) < 2 {
 		return sqlmapper.Column{}
 	}
 
 	column := sqlmapper.Column{
-		Name:       unbracketIdent(parts[0]),
-		IsNullable: true, // SQL Server columns are nullable by default
-	}
-
-	// IDENTITY(1,1) carries a comma of its own and must come out before the
-	// type is read, or the column definition splits in the middle.
-	if mssIdentityRe.MatchString(raw) {
-		column.AutoIncrement = true
-		raw = mssIdentityRe.ReplaceAllString(raw, "")
+		Name:          unbracketIdent(parts[0]),
+		IsNullable:    true, // SQL Server columns are nullable by default
+		AutoIncrement: autoIncrement,
 	}
 
 	rest := strings.TrimSpace(raw[len(parts[0]):])
@@ -709,7 +713,7 @@ func (s *SQLServer) parseColumn(def []byte) sqlmapper.Column {
 		column.DataType = normalizeSQLServerTypeName(unbracketIdent(typeExpr))
 	}
 
-	upper := strings.ToUpper(raw)
+	upper := keyword.UpperASCII(raw)
 	if strings.Contains(upper, "NOT NULL") {
 		column.IsNullable = false
 	}
@@ -799,7 +803,7 @@ func (s *SQLServer) parseConstraint(def []byte) sqlmapper.Constraint {
 		}
 	}
 
-	upperDef := bytes.ToUpper(def)
+	upperDef := keyword.UpperASCIIBytes(def)
 	switch {
 	case bytes.Contains(upperDef, []byte("PRIMARY KEY")):
 		constraint.Type = "PRIMARY KEY"
@@ -814,7 +818,7 @@ func (s *SQLServer) parseConstraint(def []byte) sqlmapper.Constraint {
 			refPart := def[idx:]
 			startIdx := bytes.Index(refPart, []byte("("))
 			endIdx := bytes.Index(refPart, []byte(")"))
-			if startIdx != -1 && endIdx != -1 {
+			if startIdx != -1 && endIdx > startIdx {
 				// REFERENCES is ten characters. Slicing from nine left its
 				// final S on the front of the table name, so the generator
 				// wrote REFERENCES S customers.
@@ -845,7 +849,7 @@ func (s *SQLServer) parseConstraint(def []byte) sqlmapper.Constraint {
 		if idx := bytes.Index(upperDef, []byte("CHECK")); idx != -1 {
 			startIdx := bytes.Index(def[idx:], []byte("("))
 			endIdx := bytes.LastIndex(def, []byte(")"))
-			if startIdx != -1 && endIdx != -1 {
+			if startIdx != -1 && endIdx > idx+startIdx {
 				constraint.CheckExpression = string(bytes.TrimSpace(def[idx+startIdx+1 : endIdx]))
 			}
 		}
@@ -856,14 +860,16 @@ func (s *SQLServer) parseConstraint(def []byte) sqlmapper.Constraint {
 
 // extractColumns extracts column names from a constraint definition.
 func (s *SQLServer) extractColumns(def []byte, afterKeyword string) []string {
-	upperDef := bytes.ToUpper(def)
+	upperDef := keyword.UpperASCIIBytes(def)
 	keyword := []byte(afterKeyword)
 
 	if idx := bytes.Index(upperDef, keyword); idx != -1 {
 		rest := def[idx+len(keyword):]
+		// Present is not enough: the pair has to be in order, or the slice runs
+		// backwards and panics.
 		startIdx := bytes.Index(rest, []byte("("))
 		endIdx := bytes.Index(rest, []byte(")"))
-		if startIdx != -1 && endIdx != -1 {
+		if startIdx != -1 && endIdx > startIdx {
 			colStr := string(rest[startIdx+1 : endIdx])
 			return s.splitAndTrim(colStr)
 		}
@@ -1000,7 +1006,7 @@ func (s *SQLServer) parseAlterTable(stmt []byte) error {
 	}
 
 	// Handle different ALTER TABLE operations
-	upperStmt := bytes.ToUpper(stmt)
+	upperStmt := keyword.UpperASCIIBytes(stmt)
 	switch {
 	case bytes.Contains(upperStmt, []byte("ADD CONSTRAINT")):
 		if s.applySQLServerAlterConstraint(tableIndex, string(stmt)) {
@@ -1048,7 +1054,7 @@ func (s *SQLServer) parseCreateView(stmt []byte) (sqlmapper.View, error) {
 	view.Name = splitBracketedName(string(m[1]))
 
 	// Extract view definition
-	if idx := bytes.Index(bytes.ToUpper(stmt), []byte(" AS ")); idx != -1 {
+	if idx := bytes.Index(keyword.UpperASCIIBytes(stmt), []byte(" AS ")); idx != -1 {
 		view.Definition = string(bytes.TrimSpace(stmt[idx+4:]))
 	}
 
@@ -1070,7 +1076,7 @@ func (s *SQLServer) parseCreateTrigger(stmt []byte) (sqlmapper.Trigger, error) {
 	// trigger came out named dbo].[bump.
 	trigger.Name = splitBracketedName(string(parts[2]))
 
-	upperStmt := bytes.ToUpper(stmt)
+	upperStmt := keyword.UpperASCIIBytes(stmt)
 
 	// Extract timing (AFTER/FOR/INSTEAD OF)
 	switch {

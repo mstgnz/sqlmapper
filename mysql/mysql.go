@@ -11,6 +11,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
+	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 )
@@ -553,7 +554,7 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 		IsNullable: true,
 	}
 
-	defUpper := strings.ToUpper(def)
+	defUpper := keyword.UpperASCII(def)
 
 	// Handle ENUM and SET – they contain parenthesised string values
 	if enumMatch := mysqlEnumValuesRe.FindStringSubmatch(def); len(enumMatch) > 2 {

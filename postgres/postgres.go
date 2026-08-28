@@ -11,6 +11,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
+	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 )
@@ -809,7 +810,7 @@ func (p *PostgreSQL) parseColumn(def string) (sqlmapper.Column, error) {
 		IsNullable: true,
 	}
 
-	defUpper := strings.ToUpper(def)
+	defUpper := keyword.UpperASCII(def)
 
 	rest := strings.TrimSpace(def[len(parts[0]):])
 	applyPGType(&column, takeUntilStopWord(rest, pgTypeStopWords))
