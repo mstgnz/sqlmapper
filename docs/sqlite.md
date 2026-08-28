@@ -142,13 +142,13 @@ the result into each server.
 
 ### Types, from SQLite
 
-| SQLite    | MySQL           | PostgreSQL      | Oracle          | SQL Server        |
-| --------- | --------------- | --------------- | --------------- | ----------------- |
-| `INTEGER` | `INT`           | `INTEGER`       | `NUMBER(10)`    | `INT`             |
-| `REAL`    | `FLOAT`         | `REAL`          | `BINARY_FLOAT`  | `REAL`            |
-| `NUMERIC(p,s)` | `DECIMAL(p,s)` | `NUMERIC(p,s)` | `NUMBER(p,s)` | `DECIMAL(p,s)`   |
-| `TEXT`    | `TEXT`          | `TEXT`          | `CLOB`          | `NVARCHAR(MAX)`   |
-| `BLOB`    | `BLOB`          | `BYTEA`         | `BLOB`          | `VARBINARY(MAX)`  |
+| SQLite         | MySQL          | PostgreSQL     | Oracle         | SQL Server       |
+| -------------- | -------------- | -------------- | -------------- | ---------------- |
+| `INTEGER`      | `INT`          | `INTEGER`      | `NUMBER(10)`   | `INT`            |
+| `REAL`         | `FLOAT`        | `REAL`         | `BINARY_FLOAT` | `REAL`           |
+| `NUMERIC(p,s)` | `DECIMAL(p,s)` | `NUMERIC(p,s)` | `NUMBER(p,s)`  | `DECIMAL(p,s)`   |
+| `TEXT`         | `TEXT`         | `TEXT`         | `CLOB`         | `NVARCHAR(MAX)`  |
+| `BLOB`         | `BLOB`         | `BYTEA`        | `BLOB`         | `VARBINARY(MAX)` |
 
 `INTEGER PRIMARY KEY AUTOINCREMENT` becomes each target's own identity: MySQL
 `INT AUTO_INCREMENT PRIMARY KEY`, PostgreSQL `SERIAL PRIMARY KEY`, Oracle

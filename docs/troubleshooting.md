@@ -8,13 +8,13 @@ The whole flag set is five options. Anything else you read elsewhere does not ex
 sqlmapper --to=<target> [--file=<path>] [--from=<source>] [--out=<path>]
 ```
 
-| Flag        | Meaning                                                                         |
-| ----------- | ------------------------------------------------------------------------------- |
-| `--to`      | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
-| `--file`    | Input SQL dump. `-` or omitted reads standard input.                            |
-| `--from`    | Source dialect. Detected from the dump when omitted.                            |
+| Flag        | Meaning                                                                                                                                           |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--to`      | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required.                                                                   |
+| `--file`    | Input SQL dump. `-` or omitted reads standard input.                                                                                              |
+| `--from`    | Source dialect. Detected from the dump when omitted.                                                                                              |
 | `--out`     | Output path. `-` writes standard output. Defaults to `<input>_<target>.sql` beside the input, or standard output when the input came from a pipe. |
-| `--version` | Print the version and exit.                                                     |
+| `--version` | Print the version and exit.                                                                                                                       |
 
 Single and double dashes are equivalent, so `-file=dump.sql` and `--file=dump.sql` both work.
 

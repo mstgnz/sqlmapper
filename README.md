@@ -281,13 +281,13 @@ fidelity for a schema that actually loads:
 
 ## Documentation
 
-| Page                                             | What is in it                                                |
-| ------------------------------------------------ | ------------------------------------------------------------ |
-| [cli.md](docs/cli.md)                             | Installing and running the command, flags, pipe recipes       |
-| [api.md](docs/api.md)                             | The library API: parsers, generators, the schema types        |
-| [stream_processing.md](docs/stream_processing.md) | Streaming dumps too large to hold in memory                   |
-| [troubleshooting.md](docs/troubleshooting.md)     | What to do when a conversion comes out wrong                  |
-| [mysql.md](docs/mysql.md), [postgresql.md](docs/postgresql.md), [sqlite.md](docs/sqlite.md), [oracle.md](docs/oracle.md), [sqlserver.md](docs/sqlserver.md) | Per-dialect notes and type tables |
+| Page                                                                                                                                                        | What is in it                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| [cli.md](docs/cli.md)                                                                                                                                       | Installing and running the command, flags, pipe recipes |
+| [api.md](docs/api.md)                                                                                                                                       | The library API: parsers, generators, the schema types  |
+| [stream_processing.md](docs/stream_processing.md)                                                                                                           | Streaming dumps too large to hold in memory             |
+| [troubleshooting.md](docs/troubleshooting.md)                                                                                                               | What to do when a conversion comes out wrong            |
+| [mysql.md](docs/mysql.md), [postgresql.md](docs/postgresql.md), [sqlite.md](docs/sqlite.md), [oracle.md](docs/oracle.md), [sqlserver.md](docs/sqlserver.md) | Per-dialect notes and type tables                       |
 
 ## Development
 

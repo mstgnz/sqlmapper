@@ -13,15 +13,15 @@ It does two things:
 
 ## Files
 
-| Path | Contents |
-| --- | --- |
-| `main.go` | The program described above |
-| `files/mysql.sql` | Sample MySQL dump |
-| `files/postgres.sql` | Sample PostgreSQL dump |
-| `files/sqlite.sql` | Sample SQLite schema |
-| `files/oracle.sql` | Sample Oracle schema |
-| `files/sqlserver.sql` | Sample SQL Server schema |
-| `files/output/` | Generated SQL, rewritten on every run |
+| Path                  | Contents                              |
+| --------------------- | ------------------------------------- |
+| `main.go`             | The program described above           |
+| `files/mysql.sql`     | Sample MySQL dump                     |
+| `files/postgres.sql`  | Sample PostgreSQL dump                |
+| `files/sqlite.sql`    | Sample SQLite schema                  |
+| `files/oracle.sql`    | Sample Oracle schema                  |
+| `files/sqlserver.sql` | Sample SQL Server schema              |
+| `files/output/`       | Generated SQL, rewritten on every run |
 
 The conversions it runs are PostgreSQL to MySQL, MySQL to PostgreSQL, Oracle to MySQL, SQL Server to PostgreSQL, and SQLite to Oracle.
 

@@ -64,23 +64,23 @@ mysqldump --no-data app | sqlmapper --from=mysql --to=postgres | psql app
 
 ## Flags
 
-| Flag        | Meaning                                                                                          |
-| ----------- | ------------------------------------------------------------------------------------------------ |
-| `--file`    | Input dump. `-` or omitted reads standard input.                                                   |
-| `--to`      | Target dialect. Required.                                                                          |
-| `--from`    | Source dialect. Detected from the dump when omitted.                                               |
+| Flag        | Meaning                                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--file`    | Input dump. `-` or omitted reads standard input.                                                                                 |
+| `--to`      | Target dialect. Required.                                                                                                        |
+| `--from`    | Source dialect. Detected from the dump when omitted.                                                                             |
 | `--out`     | Output file. `-` writes standard output. Defaults to `<input>_<target>.sql`, or standard output when the input came from a pipe. |
-| `--version` | Print the version and exit.                                                                        |
+| `--version` | Print the version and exit.                                                                                                      |
 
 Dialect names for `--from` and `--to`, with the aliases each one accepts:
 
-| Dialect    | Accepted values               |
-| ---------- | ----------------------------- |
-| MySQL      | `mysql`, `mariadb`            |
+| Dialect    | Accepted values                   |
+| ---------- | --------------------------------- |
+| MySQL      | `mysql`, `mariadb`                |
 | PostgreSQL | `postgres`, `postgresql`, `pgsql` |
-| SQLite     | `sqlite`, `sqlite3`           |
-| Oracle     | `oracle`                      |
-| SQL Server | `sqlserver`, `mssql`          |
+| SQLite     | `sqlite`, `sqlite3`               |
+| Oracle     | `oracle`                          |
+| SQL Server | `sqlserver`, `mssql`              |
 
 ## Output streams
 
