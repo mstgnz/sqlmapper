@@ -304,6 +304,11 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	booleans := p.booleanColumns(schema)
 
 	for _, table := range tables {
+		// A computed column with no type of its own cannot be declared by this
+		// target, so it is stated rather than written with an empty type.
+		for _, c := range sqlmapper.UntypedGeneratedColumns(table) {
+			result.WriteString(sqlfmt.UntypedGeneratedNote(string(schema.SourceDialect), table.Name, c.Name, c.GeneratedExpression))
+		}
 		result.WriteString(p.generateTableSQL(table, deferredFKs[table.Name]))
 		result.WriteString("\n")
 
@@ -922,6 +927,11 @@ func applyPGType(column *sqlmapper.Column, typeExpr string) {
 
 // parseColumn processes a single PostgreSQL column definition.
 func (p *PostgreSQL) parseColumn(def string) (sqlmapper.Column, error) {
+	// A computed column's clause comes off first: it carries parentheses and
+	// keywords of its own that the rest of this reader would take for a type, a
+	// default or a constraint.
+	def, generatedExpr, generatedStored, isGenerated := sqlfmt.TakeGenerated(def)
+
 	parts := strings.Fields(def)
 	if len(parts) < 2 {
 		return sqlmapper.Column{}, fmt.Errorf("invalid column definition: %s", def)
@@ -1000,6 +1010,14 @@ func (p *PostgreSQL) parseColumn(def string) (sqlmapper.Column, error) {
 		default:
 			column.DefaultValue = strings.TrimSpace(pgCastRe.ReplaceAllString(defaultPart, ""))
 		}
+	}
+
+	// A computed column has no default of its own: whatever it computes is the
+	// value, and a dialect that stated the clause states nothing else.
+	if isGenerated {
+		column.GeneratedExpression = generatedExpr
+		column.GeneratedStored = generatedStored
+		column.DefaultValue = ""
 	}
 
 	return column, nil
@@ -1381,9 +1399,10 @@ func (p *PostgreSQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmappe
 		}
 	}
 
-	totalItems := len(table.Columns) + len(tableConstraints)
+	columns, _ := sqlmapper.SplitUntypedGenerated(table.Columns)
+	totalItems := len(columns) + len(tableConstraints)
 
-	for i, col := range table.Columns {
+	for i, col := range columns {
 		result.WriteString("    ")
 		result.WriteString(p.generateColumnSQL(col, table.Name, inlinePKCols[col.Name]))
 		if i < totalItems-1 {
@@ -1395,7 +1414,10 @@ func (p *PostgreSQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmappe
 	for i, c := range tableConstraints {
 		result.WriteString("    ")
 		result.WriteString(p.generateConstraintSQL(c))
-		if len(table.Columns)+i < totalItems-1 {
+		// The count is of the columns actually written, not of every column the
+		// table has: a computed column this target cannot declare is left out,
+		// and counting it dropped the comma before the last constraint.
+		if len(columns)+i < totalItems-1 {
 			result.WriteString(",")
 		}
 		result.WriteString("\n")
@@ -1422,6 +1444,18 @@ func (p *PostgreSQL) generateColumnSQL(col sqlmapper.Column, tableName string, i
 		pgType += "[]"
 	}
 	parts = append(parts, pgType)
+
+	// A computed column states what it computes and nothing else: no default,
+	// no identity, and PostgreSQL rejects UNIQUE on one. NOT NULL it accepts.
+	if col.GeneratedExpression != "" {
+		if clause := expr.GeneratedColumn(col.GeneratedExpression, col.GeneratedStored, expr.PostgreSQL); clause != "" {
+			parts = append(parts, clause)
+			if !col.IsNullable {
+				parts = append(parts, "NOT NULL")
+			}
+			return strings.Join(parts, " ")
+		}
+	}
 
 	isSerialType := strings.HasSuffix(strings.ToLower(pgType), "serial")
 

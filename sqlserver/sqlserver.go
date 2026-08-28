@@ -14,6 +14,7 @@ import (
 	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
@@ -589,6 +590,16 @@ func (s *SQLServer) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper
 
 	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
 	for _, col := range table.Columns {
+		// A computed column carries no type here: SQL Server infers it from the
+		// expression, and stating one is a syntax error. It takes no default,
+		// no identity and no NOT NULL either.
+		if col.GeneratedExpression != "" {
+			if clause := expr.GeneratedColumn(col.GeneratedExpression, col.GeneratedStored, expr.SQLServer); clause != "" {
+				parts = append(parts, "    "+col.Name+" "+clause)
+				continue
+			}
+		}
+
 		mssType := s.resolveTypeForKey(col, keyCols[col.Name])
 		def := "    " + col.Name + " " + mssType
 		if col.AutoIncrement {
@@ -717,8 +728,14 @@ func (s *SQLServer) parseColumn(def []byte) sqlmapper.Column {
 		raw = mssIdentityRe.ReplaceAllString(raw, "")
 	}
 
+	// A computed column's clause comes off first: it carries parentheses and
+	// keywords of its own that the rest of this reader would take for a type, a
+	// default or a constraint. SQL Server states no type at all in this form, so
+	// what is left is the name alone.
+	raw, generatedExpr, generatedStored, isGenerated := sqlfmt.TakeGenerated(raw)
+
 	parts := strings.Fields(raw)
-	if len(parts) < 2 {
+	if len(parts) == 0 || (len(parts) < 2 && !isGenerated) {
 		return sqlmapper.Column{}
 	}
 
@@ -768,6 +785,14 @@ func (s *SQLServer) parseColumn(def []byte) sqlmapper.Column {
 
 	if idx := strings.Index(upper, "DEFAULT"); idx >= 0 {
 		column.DefaultValue = normalizeSQLServerDefault(strings.TrimSpace(raw[idx+len("DEFAULT"):]))
+	}
+
+	// A computed column has no default of its own: whatever it computes is the
+	// value.
+	if isGenerated {
+		column.GeneratedExpression = generatedExpr
+		column.GeneratedStored = generatedStored
+		column.DefaultValue = ""
 	}
 
 	return column

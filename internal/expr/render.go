@@ -1,6 +1,9 @@
 package expr
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Options steers how an expression is rendered.
 type Options struct {
@@ -419,4 +422,43 @@ func isNumericLiteral(s string) bool {
 		}
 	}
 	return strings.ContainsAny(s, "0123456789")
+}
+
+// GeneratedColumn renders a computed column's clause for the target.
+//
+// Each dialect spells it its own way and not all of them offer the choice of
+// where the value lives: PostgreSQL only stores it, Oracle only computes it on
+// read, and SQL Server writes PERSISTED rather than STORED and states no data
+// type at all. The expression is translated rather than copied, because it is
+// an expression like any other: a source writing CONCAT or || or + means the
+// same thing in three different spellings.
+func GeneratedColumn(expression string, stored bool, to Dialect) string {
+	body := Value(expression, to)
+	if body == "" {
+		return ""
+	}
+
+	switch to {
+	case SQLServer:
+		// T-SQL has no GENERATED ALWAYS, and a computed column carries no type.
+		if stored {
+			return fmt.Sprintf("AS (%s) PERSISTED", body)
+		}
+		return fmt.Sprintf("AS (%s)", body)
+	case PostgreSQL:
+		// PostgreSQL has only the stored form through 17, so a virtual column
+		// arriving from elsewhere becomes a stored one rather than being lost.
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) STORED", body)
+	case Oracle:
+		// Oracle's virtual column is computed on read and there is no stored
+		// form for an ordinary table, so a stored one arriving from elsewhere
+		// becomes virtual.
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) VIRTUAL", body)
+	}
+
+	// MySQL and SQLite offer both.
+	if stored {
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) STORED", body)
+	}
+	return fmt.Sprintf("GENERATED ALWAYS AS (%s) VIRTUAL", body)
 }

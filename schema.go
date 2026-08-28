@@ -121,6 +121,34 @@ type Comment struct {
 	Comment string
 }
 
+// UntypedGeneratedColumns lists the computed columns a typed target cannot
+// declare. It is the half of SplitUntypedGenerated the generators need when
+// they are writing the note rather than the table.
+func UntypedGeneratedColumns(table Table) []Column {
+	_, untyped := SplitUntypedGenerated(table.Columns)
+	return untyped
+}
+
+// SplitUntypedGenerated separates the computed columns a typed target cannot
+// declare from the rest.
+//
+// SQL Server states no data type on a computed column: it infers one from the
+// expression. PostgreSQL, MySQL and Oracle all require one, and "a * 2" is an
+// integer or a decimal depending on what a is, so there is no honest way to
+// work it out here. The column is left out of the table and stated instead,
+// rather than emitted with an empty type, which is what it used to do: the
+// whole file then failed to load.
+func SplitUntypedGenerated(columns []Column) (usable, untyped []Column) {
+	for _, c := range columns {
+		if c.GeneratedExpression != "" && strings.TrimSpace(c.DataType) == "" {
+			untyped = append(untyped, c)
+			continue
+		}
+		usable = append(usable, c)
+	}
+	return usable, untyped
+}
+
 // TypeIsPortable reports whether a user-defined type can be built on the given
 // target.
 //
@@ -245,6 +273,18 @@ type Column struct {
 	CheckExpression string
 	EnumValues      []string // for ENUM/SET types
 	IsArray         bool     // PostgreSQL array type (e.g. text[])
+
+	// GeneratedExpression is what a computed column computes. Every dialect has
+	// one and spells it differently, and none of them was read: a column
+	// declared GENERATED ALWAYS AS (a * 2) arrived as a plain column that
+	// computes nothing, and SQL Server's form, which states no type at all, was
+	// read as though "AS (a * 2)" were the type and written into the output.
+	GeneratedExpression string
+
+	// GeneratedStored says the value is written to disk rather than computed on
+	// read. Not every dialect offers the choice: PostgreSQL stores, Oracle
+	// computes, and the rest do either.
+	GeneratedStored bool
 }
 
 // Index represents a table index

@@ -6,6 +6,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSQLite_Parse(t *testing.T) {
@@ -284,4 +285,56 @@ func TestIsSQLiteInternalTable(t *testing.T) {
 			t.Errorf("%q is a normal table", name)
 		}
 	}
+}
+
+// TestSQLiteGeneratedColumn pins the computed column, which SQLite has had
+// since 3.31 and this package read as a plain column that computes nothing.
+func TestSQLiteGeneratedColumn(t *testing.T) {
+	const script = `CREATE TABLE t (
+    a INTEGER,
+    b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL,
+    c INTEGER GENERATED ALWAYS AS (a + 1) STORED,
+    d TEXT DEFAULT 'as (x)'
+);`
+
+	schema, err := NewSQLite().Parse(script)
+	require.NoError(t, err)
+	require.Len(t, schema.Tables, 1)
+	require.Len(t, schema.Tables[0].Columns, 4)
+
+	cols := map[string]sqlmapper.Column{}
+	for _, c := range schema.Tables[0].Columns {
+		cols[c.Name] = c
+	}
+
+	assert.Equal(t, "a * 2", cols["b"].GeneratedExpression)
+	assert.False(t, cols["b"].GeneratedStored)
+	assert.Equal(t, "INTEGER", cols["b"].DataType)
+
+	assert.Equal(t, "a + 1", cols["c"].GeneratedExpression)
+	assert.True(t, cols["c"].GeneratedStored)
+
+	// A default whose value happens to read like the clause is not one.
+	assert.Empty(t, cols["d"].GeneratedExpression)
+	assert.Equal(t, "as (x)", cols["d"].DefaultValue)
+
+	out, err := NewSQLite().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, "GENERATED ALWAYS AS (a * 2) VIRTUAL")
+	assert.Contains(t, out, "GENERATED ALWAYS AS (a + 1) STORED")
+
+	// SQLite is the only target that takes a column with no type at all, which
+	// is what a SQL Server source gives it, and it must not come out with the
+	// gap an empty type leaves behind.
+	untyped := &sqlmapper.Schema{Tables: []sqlmapper.Table{{
+		Name: "t",
+		Columns: []sqlmapper.Column{
+			{Name: "a", DataType: "int"},
+			{Name: "b", GeneratedExpression: "a * 2", GeneratedStored: true},
+		},
+	}}}
+	out, err = NewSQLite().Generate(untyped)
+	require.NoError(t, err)
+	assert.Contains(t, out, "b GENERATED ALWAYS AS (a * 2) STORED")
+	assert.NotContains(t, out, "b  ")
 }

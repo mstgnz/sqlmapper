@@ -26,6 +26,7 @@ CREATE TABLE orders (
     total DECIMAL(12,2) NOT NULL,
     placed_on DATE NOT NULL,
     note NVARCHAR(200) NULL CONSTRAINT DF_orders_note DEFAULT ('none'),
+    total_with_tax AS ([total] * 1.20) PERSISTED,
     CONSTRAINT PK_orders PRIMARY KEY CLUSTERED (id ASC),
     CONSTRAINT UQ_orders_day UNIQUE NONCLUSTERED (customer_id ASC, placed_on ASC)
 );

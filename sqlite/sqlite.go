@@ -257,6 +257,12 @@ func parseSQLiteTableConstraint(def []byte) (sqlmapper.Constraint, bool) {
 
 // parseSQLiteColumn reads one column definition.
 func parseSQLiteColumn(def []byte) (column sqlmapper.Column, inlineFK *sqlmapper.Constraint, ok bool) {
+	// A computed column's clause comes off first: it carries parentheses and
+	// keywords of its own that the rest of this reader would take for a type, a
+	// default or a constraint.
+	stripped, generatedExpr, generatedStored, isGenerated := sqlfmt.TakeGenerated(string(def))
+	def = []byte(stripped)
+
 	fields := bytes.Fields(def)
 	if len(fields) < 2 {
 		return sqlmapper.Column{}, nil, false
@@ -311,6 +317,14 @@ func parseSQLiteColumn(def []byte) (column sqlmapper.Column, inlineFK *sqlmapper
 	// constraint was read as no constraint at all.
 	if m := sqliteColumnCheckRe.FindSubmatch(def); m != nil {
 		column.CheckExpression = strings.TrimSpace(string(m[1]))
+	}
+
+	// A computed column has no default of its own: whatever it computes is the
+	// value.
+	if isGenerated {
+		column.GeneratedExpression = generatedExpr
+		column.GeneratedStored = generatedStored
+		column.DefaultValue = ""
 	}
 
 	return column, inlineFK, true
@@ -626,6 +640,26 @@ func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Co
 			def.WriteString("INTEGER PRIMARY KEY AUTOINCREMENT")
 			parts = append(parts, def.String())
 			continue
+		}
+
+		// A computed column states what it computes and nothing else: no
+		// default, and SQLite refuses PRIMARY KEY on one. SQLite is also the
+		// only target that takes a column with no type at all, which is what a
+		// SQL Server source gives it, so the type is written only when there is
+		// one.
+		if col.GeneratedExpression != "" {
+			if clause := expr.GeneratedColumn(col.GeneratedExpression, col.GeneratedStored, expr.SQLite); clause != "" {
+				if t := sqliteColumnType(col); strings.TrimSpace(t) != "" {
+					def.WriteString(t)
+					def.WriteString(" ")
+				}
+				def.WriteString(clause)
+				if !col.IsNullable {
+					def.WriteString(" NOT NULL")
+				}
+				parts = append(parts, def.String())
+				continue
+			}
 		}
 
 		def.WriteString(sqliteColumnType(col))

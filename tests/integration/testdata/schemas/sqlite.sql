@@ -16,6 +16,7 @@ CREATE TABLE orders (
     total NUMERIC(12,2) NOT NULL,
     placed_on TEXT NOT NULL,
     note TEXT DEFAULT 'none',
+    total_with_tax NUMERIC(12,2) GENERATED ALWAYS AS (total * 1.20) VIRTUAL,
     CONSTRAINT chk_orders_total CHECK (total >= 0),
     CONSTRAINT uq_orders_day UNIQUE (customer_id, placed_on),
     CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE CASCADE ON UPDATE RESTRICT

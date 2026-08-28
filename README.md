@@ -282,6 +282,19 @@ have none: the index widens into a full one and the dropped filter is written
 above it as a comment, because a conditional unique index that silently becomes
 unconditional starts rejecting rows that were legal before.
 
+Computed columns travel too. Each dialect spells the clause its own way and not
+all of them offer the choice of where the value lives: PostgreSQL only stores
+it, Oracle only computes it on read, and SQL Server writes `PERSISTED` rather
+than `STORED`. The expression is translated like any other, so a source writing
+one function name gets the target's.
+
+SQL Server is the exception on the way out. It states no data type on a
+computed column, inferring one from the expression, and the other three require
+one. `a * 2` is an integer or a decimal depending on what `a` is, and guessing
+produces a schema that differs from the source without saying so, so the column
+is left out of the table and stated above it with the `ALTER TABLE` that would
+add it. SQLite takes a column with no type at all, so it keeps it.
+
 ## ALTER, and what a migration file is
 
 A dump is not the only thing handed to this converter. A hand-written migration

@@ -77,6 +77,7 @@ CREATE TABLE `orders` (
   `total` decimal(12,2) NOT NULL,
   `placed_on` date NOT NULL,
   `note` varchar(200) DEFAULT 'none',
+  `total_with_tax` decimal(12,2) GENERATED ALWAYS AS ((`total` * 1.20)) STORED,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_orders_day` (`customer_id`,`placed_on`),
   CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,

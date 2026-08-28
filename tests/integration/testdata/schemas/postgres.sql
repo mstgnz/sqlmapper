@@ -194,6 +194,7 @@ CREATE TABLE public.orders (
     total numeric(12,2) NOT NULL,
     placed_on date NOT NULL,
     note character varying(200) DEFAULT 'none'::character varying,
+    total_with_tax numeric(12,2) GENERATED ALWAYS AS (total * 1.20) STORED,
     CONSTRAINT orders_total_check CHECK ((total >= (0)::numeric))
 );
 

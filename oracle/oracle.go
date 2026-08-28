@@ -434,6 +434,11 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 func (o *Oracle) parseColumn(colDef string) (sqlmapper.Column, []sqlmapper.Constraint, error) {
 	var implied []sqlmapper.Constraint
 
+	// A virtual column's clause comes off first: it carries parentheses and
+	// keywords of its own that the rest of this reader would take for a type, a
+	// default or a constraint.
+	colDef, generatedExpr, generatedStored, isGenerated := sqlfmt.TakeGenerated(colDef)
+
 	autoIncrement := oracleIdentityRe.MatchString(colDef)
 	if autoIncrement {
 		colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
@@ -504,6 +509,14 @@ func (o *Oracle) parseColumn(colDef string) (sqlmapper.Column, []sqlmapper.Const
 			}
 			implied = append(implied, constraint)
 		}
+	}
+
+	// A virtual column has no default of its own: whatever it computes is the
+	// value.
+	if isGenerated {
+		col.GeneratedExpression = generatedExpr
+		col.GeneratedStored = generatedStored
+		col.DefaultValue = ""
 	}
 
 	return col, implied, nil
@@ -853,6 +866,11 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Create tables
 	for _, table := range tables {
+		// A computed column with no type of its own cannot be declared by this
+		// target, so it is stated rather than written with an empty type.
+		for _, c := range sqlmapper.UntypedGeneratedColumns(table) {
+			result.WriteString(sqlfmt.UntypedGeneratedNote(string(schema.SourceDialect), table.Name, c.Name, c.GeneratedExpression))
+		}
 		result.WriteString(o.generateTableSQL(table, deferredFKs[table.Name]))
 
 		// Build the indexes
@@ -1214,6 +1232,18 @@ func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey, hasUni
 	oracleType := o.resolveTypeForKey(col, isKey)
 	sql := col.Name + " " + oracleType
 
+	// A virtual column states what it computes and nothing else: no default and
+	// no identity. Oracle takes NOT NULL on one.
+	if col.GeneratedExpression != "" {
+		if clause := expr.GeneratedColumn(col.GeneratedExpression, col.GeneratedStored, expr.Oracle); clause != "" {
+			sql += " " + clause
+			if !col.IsNullable {
+				sql += " NOT NULL"
+			}
+			return sql
+		}
+	}
+
 	// The literal decides, not the value: a default of NULL renders as nothing,
 	// and appending the keyword anyway wrote "DEFAULT" with no value after it.
 	if !col.AutoIncrement {
@@ -1358,8 +1388,9 @@ func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Co
 	// resolution needs to know which ones those are.
 	keyCols := sqlmapper.KeyColumns(table)
 
-	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
-	for _, col := range table.Columns {
+	columns, _ := sqlmapper.SplitUntypedGenerated(table.Columns)
+	parts := make([]string, 0, len(columns)+len(tableConstraints))
+	for _, col := range columns {
 		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name], keyCols[col.Name], sqlmapper.HasUniqueConstraint(tableConstraints, col.Name)))
 	}
 	for _, c := range tableConstraints {

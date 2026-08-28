@@ -71,7 +71,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
 		"indexes": 4, "unique indexes": 1, "composite indexes": 1, "partial indexes": 1,
 		"views": 1, "routines": 3, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"sequences": 3, "types": 1, "array columns": 1, "extensions": 1, "permissions": 2,
+		"sequences": 3, "types": 1, "array columns": 1, "extensions": 1, "permissions": 2, "generated columns": 1,
 	},
 	"mysql": {
 		"tables": 3, "columns": 18, "defaults": 6, "auto increment": 2,
@@ -81,7 +81,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
 		"indexes": 3, "unique indexes": 1, "composite indexes": 2,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"enum columns": 1, "permissions": 2,
+		"enum columns": 1, "permissions": 2, "generated columns": 1,
 	},
 	"oracle": {
 		"tables": 3, "columns": 17, "defaults": 6, "auto increment": 2,
@@ -91,7 +91,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
 		"indexes": 3, "unique indexes": 1, "composite indexes": 2,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"sequences": 1, "types": 1, "permissions": 2,
+		"sequences": 1, "types": 1, "permissions": 2, "generated columns": 1,
 	},
 	"sqlserver": {
 		"tables": 3, "columns": 17, "defaults": 6, "auto increment": 2,
@@ -101,7 +101,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
 		"indexes": 4, "unique indexes": 1, "composite indexes": 1, "partial indexes": 1,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"sequences": 1, "permissions": 2,
+		"sequences": 1, "permissions": 2, "generated columns": 1,
 	},
 	"sqlite": {
 		"tables": 3, "columns": 18, "defaults": 6, "auto increment": 2,
@@ -110,7 +110,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 1, "composite unique": 1,
 		"check constraints": 1, "column checks": 2,
 		"indexes": 4, "unique indexes": 1, "composite indexes": 2, "partial indexes": 1,
-		"views": 1, "triggers": 1,
+		"views": 1, "triggers": 1, "generated columns": 1,
 	},
 }
 
@@ -261,6 +261,9 @@ func schemaFeatures(s *sqlmapper.Schema) map[string]int {
 			}
 			if col.IsArray {
 				add("array columns", 1)
+			}
+			if col.GeneratedExpression != "" {
+				add("generated columns", 1)
 			}
 			if len(col.EnumValues) > 0 {
 				add("enum columns", 1)

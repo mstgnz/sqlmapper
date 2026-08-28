@@ -315,6 +315,11 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
 	for i, table := range tables {
+		// A computed column with no type of its own cannot be declared by this
+		// target, so it is stated rather than written with an empty type.
+		for _, c := range sqlmapper.UntypedGeneratedColumns(table) {
+			result.WriteString(sqlfmt.UntypedGeneratedNote(string(schema.SourceDialect), table.Name, c.Name, c.GeneratedExpression))
+		}
 		result.WriteString(m.generateTableSQL(table, deferredFKs[table.Name]))
 		if i < len(tables)-1 {
 			result.WriteString("\n\n")
@@ -643,6 +648,11 @@ func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.T
 
 // parseColumn processes a single column definition.
 func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
+	// A computed column's clause comes off first: it carries parentheses and
+	// keywords of its own that the rest of this reader would take for a type, a
+	// default or a constraint.
+	def, generatedExpr, generatedStored, isGenerated := sqlfmt.TakeGenerated(def)
+
 	parts := strings.Fields(def)
 	if len(parts) < 2 {
 		return sqlmapper.Column{}, fmt.Errorf("invalid column definition: %s", def)
@@ -724,6 +734,14 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 	// its own, and only the ALTER form was read.
 	if cm := mysqlInlineColCommentRe.FindStringSubmatch(def); len(cm) > 1 {
 		column.Comment = cm[1]
+	}
+
+	// A computed column has no default of its own: whatever it computes is the
+	// value, and a dialect that stated the clause states nothing else.
+	if isGenerated {
+		column.GeneratedExpression = generatedExpr
+		column.GeneratedStored = generatedStored
+		column.DefaultValue = ""
 	}
 
 	return column, nil
@@ -1056,9 +1074,10 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 		})
 	}
 
-	totalItems := len(table.Columns) + len(tableConstraints)
+	columns, _ := sqlmapper.SplitUntypedGenerated(table.Columns)
+	totalItems := len(columns) + len(tableConstraints)
 
-	for i, col := range table.Columns {
+	for i, col := range columns {
 		result.WriteString("    ")
 		result.WriteString(m.generateColumnSQL(col, inlinePKCols[col.Name], sqlmapper.HasUniqueConstraint(tableConstraints, col.Name)))
 		if i < totalItems-1 {
@@ -1070,7 +1089,10 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 	for i, c := range tableConstraints {
 		result.WriteString("    ")
 		result.WriteString(m.generateConstraintSQL(c, columnsByName(table)))
-		if len(table.Columns)+i < totalItems-1 {
+		// The count is of the columns actually written, not of every column the
+		// table has: a computed column this target cannot declare is left out,
+		// and counting it dropped the comma before the last constraint.
+		if len(columns)+i < totalItems-1 {
 			result.WriteString(",")
 		}
 		result.WriteString("\n")
@@ -1096,6 +1118,21 @@ func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK, hasUnique b
 
 	mysqlType := m.resolveType(column)
 	parts = append(parts, mysqlType)
+
+	// A computed column states what it computes and nothing else: no default,
+	// no AUTO_INCREMENT. MySQL takes NOT NULL on one.
+	if column.GeneratedExpression != "" {
+		if clause := expr.GeneratedColumn(column.GeneratedExpression, column.GeneratedStored, expr.MySQL); clause != "" {
+			parts = append(parts, clause)
+			if !column.IsNullable {
+				parts = append(parts, "NOT NULL")
+			}
+			if column.Comment != "" {
+				parts = append(parts, "COMMENT", "'"+strings.ReplaceAll(column.Comment, "'", "''")+"'")
+			}
+			return strings.Join(parts, " ")
+		}
+	}
 
 	if column.AutoIncrement {
 		parts = append(parts, "AUTO_INCREMENT")
