@@ -2,6 +2,8 @@ package sqlsplit
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -398,5 +400,81 @@ func TestRoutineStartIsReadFromTheHead(t *testing.T) {
 	if len(long)-len("BEGIN SELECT 1; SELECT 2; END") >= routineStartBound {
 		t.Errorf("the longest real header is %d bytes and the bound is %d",
 			len(long), routineStartBound)
+	}
+}
+
+// TestStartsRoutineAgreesWithTheGrammar holds the scanner to the pattern.
+//
+// routineStart is the written grammar and startsRoutine is what runs: asking a
+// backtracking regex once per statement was a quarter of the time it took to
+// parse a large dump. Two implementations of one rule drift unless something
+// compares them, so this does.
+func TestStartsRoutineAgreesWithTheGrammar(t *testing.T) {
+	heads := []string{
+		// routines, in the shapes the dump tools write
+		"CREATE FUNCTION f() RETURNS int AS $$",
+		"CREATE OR REPLACE FUNCTION f() RETURNS int",
+		"create procedure p()",
+		"CREATE PROC p",
+		"CREATE TRIGGER trg BEFORE INSERT ON t",
+		"CREATE OR ALTER TRIGGER trg ON t",
+		"CREATE DEFINER=`root`@`localhost` TRIGGER `bump` BEFORE INSERT ON `users`",
+		"CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER TRIGGER t",
+		"CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" RETURN NUMBER IS",
+		"CREATE OR REPLACE NONEDITIONABLE PROCEDURE p IS",
+		"CREATE PACKAGE pkg AS",
+		"CREATE TYPE BODY addr_t AS",
+		"DECLARE x int;",
+		"BEGIN",
+		"  begin",
+
+		// not routines
+		"CREATE TABLE t (a int)",
+		"CREATE OR REPLACE VIEW v AS SELECT 1",
+		"CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v` AS select 1",
+		"CREATE UNIQUE INDEX ix ON t (a)",
+		"CREATE SEQUENCE s",
+		"CREATE TYPE addr_t AS OBJECT (street VARCHAR2(100))",
+		"CREATE OR REPLACE TYPE addr_t AS OBJECT (a int)",
+		"ALTER TABLE t ADD COLUMN a int",
+		"INSERT INTO t VALUES (1)",
+		"SET @x = 1",
+		"GRANT SELECT ON t TO r",
+		"",
+		"   ",
+		"CREATE",
+		"-- CREATE FUNCTION f()",
+	}
+
+	for _, head := range heads {
+		want := routineStart.MatchString(head)
+		if got := startsRoutine(head); got != want {
+			t.Errorf("startsRoutine(%q) = %v, the grammar says %v", head, got, want)
+		}
+	}
+}
+
+// TestStartsRoutineAgreesOnTheFixtures runs the same comparison over every
+// statement of the comprehensive fixtures, which are real dump output.
+func TestStartsRoutineAgreesOnTheFixtures(t *testing.T) {
+	for _, file := range []string{"postgres.sql", "mysql.sql", "oracle.sql", "sqlserver.sql", "sqlite.sql"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "tests", "integration", "testdata", "schemas", file))
+		if err != nil {
+			t.Skipf("fixture unavailable: %v", err)
+		}
+		// Every prefix boundary is checked, not only whole statements: the
+		// splitter asks the question against whatever it has buffered so far.
+		text := string(b)
+		for i := 0; i < len(text); i += 97 {
+			head := text[:i]
+			if len(head) > routineStartBound {
+				head = head[:routineStartBound]
+			}
+			want := routineStart.MatchString(head)
+			if got := startsRoutine(head); got != want {
+				t.Fatalf("%s at %d: startsRoutine = %v, the grammar says %v\nhead: %q",
+					file, i, got, want, head)
+			}
+		}
 	}
 }

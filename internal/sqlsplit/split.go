@@ -49,13 +49,14 @@ func ModeFor(delimiter string) Mode {
 // Inside one of these only the line terminator ends the statement, which is how
 // Oracle's slash and SQL Server's GO are meant to be used.
 var routineStart = regexp.MustCompile(`(?is)^\s*(?:CREATE` +
-	`(?:\s+OR\s+ALTER)?(?:\s+OR\s+REPLACE)?` +
 	// mysqldump writes DEFINER, and a view or routine can carry ALGORITHM and
 	// SQL SECURITY too. Without them a dumped trigger did not look like a
-	// routine at all, and its body was cut at the first inner semicolon.
-	`(?:\s+DEFINER\s*=\s*\S+)?(?:\s+ALGORITHM\s*=\s*\S+)?(?:\s+SQL\s+SECURITY\s+\w+)?` +
+	// routine at all, and its body was cut at the first inner semicolon. They
+	// are matched in any order: MySQL does not fix one, and writing ALGORITHM
+	// before DEFINER made a real trigger stop looking like a routine.
 	// DBMS_METADATA writes EDITIONABLE between REPLACE and the object keyword.
-	`(?:\s+(?:NON)?EDITIONABLE)?` +
+	`(?:\s+(?:OR\s+ALTER|OR\s+REPLACE|DEFINER\s*=\s*\S+|ALGORITHM\s*=\s*\S+` +
+	`|SQL\s+SECURITY\s+\w+|(?:NON)?EDITIONABLE))*` +
 	`\s+(?:FUNCTION|PROCEDURE|PROC|TRIGGER|PACKAGE|TYPE\s+BODY)|DECLARE|BEGIN)\b`)
 
 // delimiterDirective matches MySQL's DELIMITER, which changes the terminator
@@ -86,7 +87,14 @@ type Splitter struct {
 	// comment or a dollar-quoted body is not one.
 	sawBegin bool
 	prevWord string
-	word     strings.Builder
+
+	// isRoutine caches whether the statement being accumulated starts a routine.
+	// The test is a regex anchored at the start, so the answer cannot change
+	// once the head is read, and asking it again on every terminator was a
+	// quarter of the time it took to parse a large dump.
+	isRoutine  bool
+	routineSet bool
+	word       strings.Builder
 
 	buf  strings.Builder
 	line strings.Builder // the current line, for the line-oriented terminators
@@ -138,6 +146,7 @@ func (s *Splitter) next() (string, error) {
 	s.line.Reset()
 	s.sawBegin = false
 	s.prevWord = ""
+	s.routineSet = false
 	s.word.Reset()
 	s.versionComment = 0
 
@@ -267,6 +276,24 @@ func (s *Splitter) next() (string, error) {
 // SQL Server writes GO, MySQL changes the delimiter, PostgreSQL wraps the body
 // in dollar quotes. SQLite has none of those, and marks the end with END, so
 // that is what closes one here.
+// routineStarted reports whether the statement being accumulated starts a
+// routine, computing it once. A terminator can arrive many times in one
+// statement and the answer is the same every time.
+func (s *Splitter) routineStarted() bool {
+	if s.routineSet {
+		return s.isRoutine
+	}
+	head := s.buf.String()
+	if len(head) > routineStartBound {
+		head = head[:routineStartBound]
+	}
+	s.isRoutine = startsRoutine(head)
+	// The answer is only final once the head is long enough to hold the longest
+	// match; before that a longer buffer could still turn a no into a yes.
+	s.routineSet = len(head) >= routineStartBound || s.isRoutine
+	return s.isRoutine
+}
+
 // routineStartBound caps how much of a statement the routine test reads.
 //
 // The pattern is anchored at the start, so nothing past its longest possible
@@ -278,11 +305,7 @@ func (s *Splitter) next() (string, error) {
 const routineStartBound = 512
 
 func (s *Splitter) terminatorApplies() bool {
-	head := s.buf.String()
-	if len(head) > routineStartBound {
-		head = head[:routineStartBound]
-	}
-	if !routineStart.MatchString(head) {
+	if !s.routineStarted() {
 		return true
 	}
 	if s.mode != Semicolon {
@@ -573,4 +596,128 @@ func (s *Splitter) finish() (string, error) {
 		return s.buf.String(), nil
 	}
 	return "", io.EOF
+}
+
+// startsRoutine answers what routineStart matches, by reading words rather than
+// by running a regex.
+//
+// It is asked once per statement, so on a dump with a few thousand statements
+// the regex was a quarter of the time it took to parse the file: a backtracking
+// match over the head of every statement, nearly all of which are CREATE TABLE.
+// routineStart stays as the written grammar and as the test's authority; this
+// is what runs.
+func startsRoutine(head string) bool {
+	// At most this many words are read. The longest real header is a CREATE
+	// carrying OR REPLACE, DEFINER, ALGORITHM, SQL SECURITY and EDITIONABLE
+	// before the object keyword.
+	const maxWords = 16
+
+	// Only whitespace is skipped before the first word. Skipping punctuation
+	// too would read "-- CREATE FUNCTION f()" as a routine, and the grammar
+	// anchors on whitespace alone.
+	i := 0
+	for i < len(head) && (head[i] == ' ' || head[i] == '\t' || head[i] == '\n' || head[i] == '\r') {
+		i++
+	}
+	if i < len(head) && !isWordByte(head[i]) {
+		return false
+	}
+
+	for n := 0; n < maxWords; n++ {
+		for i < len(head) && !isWordByte(head[i]) {
+			// An equals sign or a quote belongs to DEFINER=`x`@`y`, which is
+			// skipped along with the rest of the punctuation between words.
+			i++
+		}
+		start := i
+		for i < len(head) && isWordByte(head[i]) {
+			i++
+		}
+		if start == i {
+			return false
+		}
+
+		switch upperWord(head[start:i]) {
+		case "DECLARE", "BEGIN", "FUNCTION", "PROCEDURE", "PROC", "TRIGGER", "PACKAGE":
+			return true
+		case "TYPE":
+			// TYPE alone is a declaration; TYPE BODY is the implementation, and
+			// only the second carries a block with semicolons in it.
+			return nextWordIs(head[i:], "BODY")
+		case "DEFINER", "ALGORITHM":
+			// The value is one blob rather than several words:
+			// DEFINER=`root`@`localhost` is quoted, punctuated and would
+			// otherwise be read as an object keyword.
+			i = skipAssignedValue(head, i)
+
+		case "CREATE", "OR", "ALTER", "REPLACE", "SQL", "SECURITY",
+			"EDITIONABLE", "NONEDITIONABLE", "UNDEFINED", "MERGE",
+			"TEMPTABLE", "INVOKER":
+			// A modifier, or a modifier's value. Keep reading.
+		default:
+			// Anything else is the object keyword, and it is not a routine.
+			return false
+		}
+	}
+	return false
+}
+
+// nextWordIs reports whether the next word of s is want.
+func nextWordIs(s, want string) bool {
+	i := 0
+	for i < len(s) && !isWordByte(s[i]) {
+		i++
+	}
+	start := i
+	for i < len(s) && isWordByte(s[i]) {
+		i++
+	}
+	return upperWord(s[start:i]) == want
+}
+
+// upperWord folds a word for comparison without allocating for the common case
+// of a word that is already upper case.
+func upperWord(w string) string {
+	needs := false
+	for i := 0; i < len(w); i++ {
+		if w[i] >= 'a' && w[i] <= 'z' {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return w
+	}
+	b := make([]byte, len(w))
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// skipAssignedValue steps past the "= value" of a DEFINER or ALGORITHM clause,
+// which is one token however it is punctuated.
+func skipAssignedValue(head string, i int) int {
+	for i < len(head) && (head[i] == ' ' || head[i] == '\t' || head[i] == '\n' || head[i] == '\r') {
+		i++
+	}
+	if i >= len(head) || head[i] != '=' {
+		return i
+	}
+	i++
+	for i < len(head) && (head[i] == ' ' || head[i] == '\t' || head[i] == '\n' || head[i] == '\r') {
+		i++
+	}
+	for i < len(head) && head[i] != ' ' && head[i] != '\t' && head[i] != '\n' && head[i] != '\r' {
+		i++
+	}
+	return i
 }

@@ -299,15 +299,24 @@ func ApplyAll(schema *sqlmapper.Schema, statements []string, read Reader) {
 	// anything. Every dump tool writes DROP TABLE IF EXISTS ahead of the CREATE
 	// that replaces it, and replaying those after the CREATEs had been read
 	// deleted the whole schema.
-	created := lastCreated(statements)
+	//
+	// The index of what each statement creates is built on the first drop rather
+	// than up front: a file with no drop in it, which is what pg_dump writes,
+	// pays nothing for a question it never asks.
+	var created map[string]int
 
 	for i, stmt := range statements {
 		st, ok := Parse(stmt)
 		if !ok {
 			continue
 		}
-		if isDrop(st.Action) && len(st.Names) > 0 && created[strings.ToLower(st.Names[0])] > i {
-			continue
+		if isDrop(st.Action) && len(st.Names) > 0 {
+			if created == nil {
+				created = lastCreated(statements)
+			}
+			if created[strings.ToLower(st.Names[0])] > i {
+				continue
+			}
 		}
 		Apply(schema, st, read)
 	}
@@ -332,6 +341,10 @@ func isDrop(a Action) bool {
 var createRe = regexp.MustCompile(`(?is)^\s*CREATE\b(?:.{0,300}?)\b(?:TABLE|INDEX|VIEW|SEQUENCE|TYPE)\s+` +
 	`(?:IF\s+NOT\s+EXISTS\s+)?([\[\]"` + "`" + `\w.]+)`)
 
+// createHeadBound caps how much of a statement the create reader looks at. The
+// name follows the object keyword, which follows at most a few modifiers.
+const createHeadBound = 400
+
 // lastCreated records, for each object name, the last statement that creates
 // it. A drop before that is a drop of something that comes back.
 func lastCreated(statements []string) map[string]int {
@@ -340,7 +353,14 @@ func lastCreated(statements []string) map[string]int {
 		if !keyword.HasPrefix(strings.TrimSpace(stmt), "CREATE") {
 			continue
 		}
-		if m := createRe.FindStringSubmatch(stmt); m != nil {
+		// Only the head is read. The name always sits within the first few
+		// words, and matching against a whole CREATE TABLE body cost a scan of
+		// every table in the file.
+		head := stmt
+		if len(head) > createHeadBound {
+			head = head[:createHeadBound]
+		}
+		if m := createRe.FindStringSubmatch(head); m != nil {
 			out[strings.ToLower(unqualify(m[1]))] = i
 		}
 	}

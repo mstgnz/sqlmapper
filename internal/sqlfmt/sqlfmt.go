@@ -218,6 +218,14 @@ var generatedHeadRe = regexp.MustCompile(`(?is)(?:GENERATED\s+ALWAYS\s+)?\bAS\s*
 // Server, PERSISTED; one that does not is read as computed, and each generator
 // writes whichever of the two its own target supports.
 func TakeGenerated(def string) (rest, expression string, stored, ok bool) {
+	// Almost no column is computed, and this runs on every column of every
+	// table: blanking the string contents and running a regex over each one cost
+	// more than the rest of the reader put together. A definition with no AS in
+	// it cannot carry the clause, and that is nearly all of them.
+	if !containsAS(def) {
+		return def, "", false, false
+	}
+
 	// The clause is located in a copy whose string contents are blanked, so a
 	// default whose value happens to read like one, DEFAULT 'as (x)', is not
 	// mistaken for it. The offsets still hold: blanking preserves length.
@@ -315,4 +323,29 @@ func DeferrableNote(name string, initially string) string {
 	// generator last emitted, which does not always end its own line.
 	return fmt.Sprintf("\n-- not carried, this target checks every constraint per statement: %s was DEFERRABLE INITIALLY %s\n",
 		which, strings.ToUpper(initially))
+}
+
+// containsAS reports whether a definition holds the word AS, in either case and
+// without allocating. It is the fast path in front of the computed-column
+// reader, which nearly every column takes.
+func containsAS(def string) bool {
+	for i := 0; i+1 < len(def); i++ {
+		if (def[i] != 'a' && def[i] != 'A') || (def[i+1] != 's' && def[i+1] != 'S') {
+			continue
+		}
+		// A word on its own, not the tail of "has" or the head of "asc".
+		if i > 0 && isWordByte(def[i-1]) {
+			continue
+		}
+		if i+2 < len(def) && isWordByte(def[i+2]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isWordByte reports whether c can appear inside an identifier.
+func isWordByte(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
