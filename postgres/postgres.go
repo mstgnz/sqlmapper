@@ -10,10 +10,12 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/expr"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 )
 
 // toPostgresType maps any source database type (MySQL or PostgreSQL) to the PostgreSQL equivalent.
@@ -209,6 +211,17 @@ func (p *PostgreSQL) Parse(content string) (*sqlmapper.Schema, error) {
 	if err := p.parsePermissions(content); err != nil {
 		return nil, fmt.Errorf("error parsing permissions: %v", err)
 	}
+
+	// ALTER last, so a statement that renames or drops something can find what
+	// it names. Only the constraint and default forms were read before, and an
+	// ALTER TABLE ADD COLUMN was discarded without a word.
+	alter.ApplyAll(p.schema, splitStatements(content), alter.Reader{
+		Column: p.parseColumn,
+		// The default is read by the same code the ALTER ... SET DEFAULT pass
+		// uses, which strips a nextval() and a ::type cast. Taking the literal
+		// as it stands stored "'draft'::character varying" as the default.
+		Default: applyPGDefault,
+	})
 
 	// A column declared as a user-defined enum carries only the type's name,
 	// which means nothing to a target that has no such type. The values are in
@@ -498,6 +511,36 @@ func (p *PostgreSQL) parseSequences(content string) error {
 // parseAlterColumnDefaults resolves the pg_dump idiom of declaring a plain
 // integer column and wiring it to a sequence in a later ALTER TABLE. Without
 // this the column loses its auto-increment behaviour on the way out.
+// applyPGDefault reads a PostgreSQL default literal onto a column.
+//
+// It is shared by the ALTER ... SET DEFAULT pass and the ALTER replay, which
+// would otherwise hold two readings of the same syntax. A nextval() is not a
+// default but an identity, and a ::type cast belongs to PostgreSQL alone: kept,
+// it travelled into every other dialect as part of the value.
+func applyPGDefault(col *sqlmapper.Column, raw string) {
+	value := strings.TrimSpace(raw)
+	upper := strings.ToUpper(value)
+	switch {
+	case strings.HasPrefix(upper, "NEXTVAL("):
+		col.AutoIncrement = true
+		col.DefaultValue = ""
+	case strings.Contains(upper, "CURRENT_TIMESTAMP") || strings.Contains(upper, "NOW()"):
+		col.DefaultValue = "CURRENT_TIMESTAMP"
+	case strings.HasPrefix(value, "'"):
+		if q := pgQuotedLiteralRe.FindStringSubmatch(value); len(q) > 1 {
+			col.DefaultValue = q[1]
+		}
+	case upper == "NULL":
+		col.DefaultValue = ""
+	default:
+		col.DefaultValue = strings.TrimSpace(pgCastRe.ReplaceAllString(value, ""))
+	}
+}
+
+// pgQuotedLiteralRe takes the value out of a quoted default. It was compiled on
+// every call before, inside the loop that reads them.
+var pgQuotedLiteralRe = regexp.MustCompile(`'([^']*)'`)
+
 func (p *PostgreSQL) parseAlterColumnDefaults(content string) error {
 	apply := func(rawTable, rawColumn string, fn func(*sqlmapper.Column)) {
 		table := strings.Trim(rawTable, `"`)
@@ -522,24 +565,9 @@ func (p *PostgreSQL) parseAlterColumnDefaults(content string) error {
 		if len(m) < 4 {
 			continue
 		}
-		value := strings.TrimSpace(m[3])
-		upper := strings.ToUpper(value)
+		value := m[3]
 		apply(m[1], m[2], func(col *sqlmapper.Column) {
-			switch {
-			case strings.HasPrefix(upper, "NEXTVAL("):
-				col.AutoIncrement = true
-				col.DefaultValue = ""
-			case strings.Contains(upper, "CURRENT_TIMESTAMP") || strings.Contains(upper, "NOW()"):
-				col.DefaultValue = "CURRENT_TIMESTAMP"
-			case strings.HasPrefix(value, "'"):
-				if q := regexp.MustCompile(`'([^']*)'`).FindStringSubmatch(value); len(q) > 1 {
-					col.DefaultValue = q[1]
-				}
-			case upper == "NULL":
-				col.DefaultValue = ""
-			default:
-				col.DefaultValue = strings.TrimSpace(pgCastRe.ReplaceAllString(value, ""))
-			}
+			applyPGDefault(col, value)
 		})
 	}
 
@@ -1577,6 +1605,23 @@ func (p *PostgreSQL) generateIndexSQL(tableName string, index sqlmapper.Index, b
 	}
 	sb.WriteString(";")
 	return sb.String()
+}
+
+// splitStatements cuts normalised content into statements for the ALTER replay.
+// The splitter is used rather than a plain Split on the semicolon because a
+// routine body carries semicolons of its own.
+func splitStatements(content string) []string {
+	var out []string
+	splitter := sqlsplit.New(strings.NewReader(content), ";")
+	for {
+		stmt, err := splitter.Next()
+		if err != nil {
+			return out
+		}
+		if stmt = strings.TrimSpace(stmt); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
 }
 
 // generateTypeSQL generates SQL for a PostgreSQL type definition.

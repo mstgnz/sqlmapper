@@ -10,10 +10,12 @@ import (
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/expr"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 )
 
 // toMySQLType maps any source database type (MySQL or PostgreSQL) to the MySQL equivalent.
@@ -265,7 +267,29 @@ func (m *MySQL) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, fmt.Errorf("error parsing permissions: %v", err)
 	}
 
+	// ALTER last, so a statement that renames or drops something can find what
+	// it names. Only the comment forms were read before, and an ALTER TABLE ADD
+	// COLUMN was discarded without a word.
+	alter.ApplyAll(m.schema, splitStatements(content), alter.Reader{Column: m.parseColumn})
+
 	return m.schema, nil
+}
+
+// splitStatements cuts normalised content into statements for the ALTER replay.
+// The splitter is used rather than a plain Split on the semicolon because a
+// routine body carries semicolons of its own.
+func splitStatements(content string) []string {
+	var out []string
+	splitter := sqlsplit.New(strings.NewReader(content), ";")
+	for {
+		stmt, err := splitter.Next()
+		if err != nil {
+			return out
+		}
+		if stmt = strings.TrimSpace(stmt); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
 }
 
 // Generate creates MySQL SQL from a schema structure.

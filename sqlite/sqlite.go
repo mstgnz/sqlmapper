@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/expr"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
@@ -64,6 +65,11 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 	// one.
 	splitter := sqlsplit.New(strings.NewReader(content), ";")
 
+	// ALTER is held back and replayed once every table is read: a rename or a
+	// drop has to find what it names. Nothing read one before, so a schema file
+	// that added a column in an ALTER lost it without a word.
+	var deferredAlters []string
+
 	for {
 		raw, err := splitter.Next()
 		if err == io.EOF {
@@ -79,6 +85,11 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 		}
 
 		upperStmt := bytes.ToUpper(stmt)
+
+		if keyword.HasPrefixBytes(upperStmt, "ALTER TABLE") {
+			deferredAlters = append(deferredAlters, string(stmt))
+			continue
+		}
 
 		switch {
 		case keyword.HasPrefixBytes(upperStmt, "CREATE TABLE"):
@@ -114,6 +125,18 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 			s.schema.Triggers = append(s.schema.Triggers, trigger)
 		}
 	}
+
+	// SQLite has ADD COLUMN, DROP COLUMN and both renames, and none of the
+	// forms that restate a column: there is no MODIFY and no DROP CONSTRAINT.
+	alter.ApplyAll(s.schema, deferredAlters, alter.Reader{
+		Column: func(def string) (sqlmapper.Column, error) {
+			col, _, ok := parseSQLiteColumn([]byte(def))
+			if !ok {
+				return sqlmapper.Column{}, fmt.Errorf("not a column definition: %q", def)
+			}
+			return col, nil
+		},
+	})
 
 	return s.schema, nil
 }

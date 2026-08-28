@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
@@ -178,6 +179,10 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 	// Split content into statements
 	statements := s.splitStatements(contentBytes)
 
+	// The ALTER forms that are not constraints are held back and replayed once
+	// every table exists, because a rename or a drop has to find what it names.
+	var deferredAlters []string
+
 	for _, stmt := range statements {
 		stmt = bytes.TrimSpace(stmt)
 		if len(stmt) == 0 {
@@ -213,6 +218,16 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 			if err := s.parseAlterTable(stmt); err != nil {
 				return nil, fmt.Errorf("error parsing ALTER TABLE: %v", err)
 			}
+			// parseAlterTable reads the constraint forms only; the rest is
+			// held back.
+			deferredAlters = append(deferredAlters, string(stmt))
+
+		// SQL Server has no RENAME statement and scripts one as a procedure
+		// call, which is why a rename never looked like an ALTER at all. Only
+		// sp_rename is claimed: matching every EXEC shadowed the extended
+		// property case above it and every comment stopped being read.
+		case mssSpRenameRe.Match(upperStmt):
+			deferredAlters = append(deferredAlters, string(stmt))
 
 		case bytes.HasPrefix(upperStmt, []byte("CREATE VIEW")):
 			view, err := s.parseCreateView(stmt)
@@ -241,6 +256,15 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 			}
 		}
 	}
+
+	// The held-back statements, replayed now that every table is read. Only
+	// the constraint forms were handled before, and an ALTER TABLE ADD COLUMN
+	// was discarded without a word.
+	alter.ApplyAll(s.schema, deferredAlters, alter.Reader{
+		Column: func(def string) (sqlmapper.Column, error) {
+			return s.parseColumn([]byte(def)), nil
+		},
+	})
 
 	return s.schema, nil
 }
@@ -1022,6 +1046,11 @@ func (s *SQLServer) parsePermission(stmt []byte) bool {
 	}
 	return false
 }
+
+// mssSpRenameRe recognises the procedure call SQL Server uses for a rename. It
+// is matched narrowly rather than by the EXEC keyword, which would also claim
+// sp_addextendedproperty and take every comment with it.
+var mssSpRenameRe = regexp.MustCompile(`(?i)^\s*EXEC(?:UTE)?\s+(?:SYS\.)?SP_RENAME\b`)
 
 // mssScriptPreamble is what SSMS opens every generated script with. A filtered
 // index is refused without it: "CREATE INDEX failed because the following SET

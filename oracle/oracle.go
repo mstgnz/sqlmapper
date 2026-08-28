@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mstgnz/sqlmapper/internal/alter"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/internal/routine"
 	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
@@ -277,7 +278,9 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 	}
 
 	// COMMENT ON arrives in statements of its own, so the comments are collected
-	// as the statements go by and applied once every table has been read.
+	// as the statements go by and applied once every table has been read. The
+	// ALTER statements are held back for the same reason.
+	var deferredAlters []string
 	tableComments := map[string]string{}
 	columnComments := map[string]map[string]string{}
 
@@ -314,6 +317,13 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 				return nil, err
 			}
 			o.schema.Sequences = append(o.schema.Sequences, seq)
+		}
+
+		// ALTER, held back and replayed once every table is read: a rename or a
+		// drop has to find what it names. Only ADD CONSTRAINT was read before,
+		// and an ALTER TABLE ADD COLUMN was discarded without a word.
+		if keyword.HasPrefix(upperStmt, "ALTER TABLE") {
+			deferredAlters = append(deferredAlters, stmt)
 		}
 
 		// GRANT and REVOKE, which arrive as statements of their own.
@@ -391,6 +401,13 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		}
 	}
 
+	alter.ApplyAll(o.schema, deferredAlters, alter.Reader{
+		Column: func(def string) (sqlmapper.Column, error) {
+			col, _, err := o.parseColumn(def)
+			return col, err
+		},
+	})
+
 	return o.schema, nil
 }
 
@@ -407,6 +424,91 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 // Returns:
 //   - sqlmapper.Table: The parsed table structure
 //   - error: An error if parsing fails
+//
+// parseColumn reads one Oracle column definition.
+//
+// It was inline in the CREATE TABLE loop, which meant an ALTER TABLE ADD
+// COLUMN had no way to read the column it adds. The constraints a definition
+// implies are returned alongside rather than appended to a table, so the
+// caller decides where they go.
+func (o *Oracle) parseColumn(colDef string) (sqlmapper.Column, []sqlmapper.Constraint, error) {
+	var implied []sqlmapper.Constraint
+
+	autoIncrement := oracleIdentityRe.MatchString(colDef)
+	if autoIncrement {
+		colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
+	}
+
+	parts := strings.Fields(colDef)
+	if len(parts) < 2 {
+		return sqlmapper.Column{}, nil, fmt.Errorf("not a column definition: %q", colDef)
+	}
+
+	col := sqlmapper.Column{
+		Name: unquoteOracleIdent(parts[0]),
+		// Oracle columns are nullable unless the definition says otherwise.
+		// Leaving this at the zero value marked every column NOT NULL.
+		IsNullable:    true,
+		AutoIncrement: autoIncrement,
+	}
+
+	rest := strings.TrimSpace(colDef[len(parts[0]):])
+	applyOracleType(&col, takeOracleType(rest))
+
+	if strings.Contains(strings.ToUpper(colDef), "NOT NULL") {
+		col.IsNullable = false
+	}
+
+	if strings.Contains(strings.ToUpper(colDef), "DEFAULT") {
+		defaultIdx := strings.Index(keyword.UpperASCII(colDef), "DEFAULT")
+		// TrimSpace before looking for the terminator: the character right
+		// after DEFAULT is a space, so searching the untrimmed remainder
+		// found index 0 and every default came out empty.
+		restStr := strings.TrimSpace(colDef[defaultIdx+len("DEFAULT"):])
+		col.DefaultValue = oracleDefaultValue(restStr)
+
+		// SYSDATE and SYSTIMESTAMP are Oracle's now(); quoting them as a
+		// literal produced DEFAULT 'SYSTIMESTAMP', which no other dialect
+		// accepts on a timestamp column.
+		switch strings.ToUpper(col.DefaultValue) {
+		case "SYSDATE", "SYSTIMESTAMP", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CURRENT_DATE":
+			col.DefaultValue = "CURRENT_TIMESTAMP"
+		}
+	}
+
+	if strings.Contains(colDef, "PRIMARY KEY") {
+		col.IsPrimaryKey = true
+		constraint := sqlmapper.Constraint{
+			Type:    "PRIMARY KEY",
+			Columns: []string{col.Name},
+		}
+		implied = append(implied, constraint)
+	}
+
+	if strings.Contains(colDef, "UNIQUE") {
+		col.IsUnique = true
+		constraint := sqlmapper.Constraint{
+			Type:    "UNIQUE",
+			Columns: []string{col.Name},
+		}
+		implied = append(implied, constraint)
+	}
+
+	if strings.Contains(colDef, "CHECK") {
+		checkRegex := regexp.MustCompile(`CHECK\s*\(([^)]+)\)`)
+		matches := checkRegex.FindStringSubmatch(colDef)
+		if len(matches) > 1 {
+			constraint := sqlmapper.Constraint{
+				Type:            "CHECK",
+				CheckExpression: strings.TrimSpace(matches[1]),
+			}
+			implied = append(implied, constraint)
+		}
+	}
+
+	return col, implied, nil
+}
+
 func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 	table := sqlmapper.Table{}
 
@@ -508,7 +610,7 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 				}
 			} else if strings.Contains(colDef, "CHECK") {
 				constraint.Type = "CHECK"
-				// Check ifadesini al
+				// Read the check expression
 				checkRegex := regexp.MustCompile(`CHECK\s*\(([^)]+)\)`)
 				matches = checkRegex.FindStringSubmatch(colDef)
 				if len(matches) > 1 {
@@ -523,78 +625,11 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 		// read as part of the type and the default. It is stripped first so the
 		// fields below are the fields of what is left: taking them from the
 		// original text and then slicing the shortened one ran off the end.
-		autoIncrement := oracleIdentityRe.MatchString(colDef)
-		if autoIncrement {
-			colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
-		}
-
-		parts := strings.Fields(colDef)
-		if len(parts) < 2 {
+		col, implied, err := o.parseColumn(colDef)
+		if err != nil {
 			continue
 		}
-
-		col := sqlmapper.Column{
-			Name: unquoteOracleIdent(parts[0]),
-			// Oracle columns are nullable unless the definition says otherwise.
-			// Leaving this at the zero value marked every column NOT NULL.
-			IsNullable:    true,
-			AutoIncrement: autoIncrement,
-		}
-
-		rest := strings.TrimSpace(colDef[len(parts[0]):])
-		applyOracleType(&col, takeOracleType(rest))
-
-		if strings.Contains(strings.ToUpper(colDef), "NOT NULL") {
-			col.IsNullable = false
-		}
-
-		if strings.Contains(strings.ToUpper(colDef), "DEFAULT") {
-			defaultIdx := strings.Index(keyword.UpperASCII(colDef), "DEFAULT")
-			// TrimSpace before looking for the terminator: the character right
-			// after DEFAULT is a space, so searching the untrimmed remainder
-			// found index 0 and every default came out empty.
-			restStr := strings.TrimSpace(colDef[defaultIdx+len("DEFAULT"):])
-			col.DefaultValue = oracleDefaultValue(restStr)
-
-			// SYSDATE and SYSTIMESTAMP are Oracle's now(); quoting them as a
-			// literal produced DEFAULT 'SYSTIMESTAMP', which no other dialect
-			// accepts on a timestamp column.
-			switch strings.ToUpper(col.DefaultValue) {
-			case "SYSDATE", "SYSTIMESTAMP", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CURRENT_DATE":
-				col.DefaultValue = "CURRENT_TIMESTAMP"
-			}
-		}
-
-		if strings.Contains(colDef, "PRIMARY KEY") {
-			col.IsPrimaryKey = true
-			constraint := sqlmapper.Constraint{
-				Type:    "PRIMARY KEY",
-				Columns: []string{col.Name},
-			}
-			table.Constraints = append(table.Constraints, constraint)
-		}
-
-		if strings.Contains(colDef, "UNIQUE") {
-			col.IsUnique = true
-			constraint := sqlmapper.Constraint{
-				Type:    "UNIQUE",
-				Columns: []string{col.Name},
-			}
-			table.Constraints = append(table.Constraints, constraint)
-		}
-
-		if strings.Contains(colDef, "CHECK") {
-			checkRegex := regexp.MustCompile(`CHECK\s*\(([^)]+)\)`)
-			matches := checkRegex.FindStringSubmatch(colDef)
-			if len(matches) > 1 {
-				constraint := sqlmapper.Constraint{
-					Type:            "CHECK",
-					CheckExpression: strings.TrimSpace(matches[1]),
-				}
-				table.Constraints = append(table.Constraints, constraint)
-			}
-		}
-
+		table.Constraints = append(table.Constraints, implied...)
 		table.Columns = append(table.Columns, col)
 	}
 

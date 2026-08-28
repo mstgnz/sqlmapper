@@ -282,6 +282,37 @@ have none: the index widens into a full one and the dropped filter is written
 above it as a comment, because a conditional unique index that silently becomes
 unconditional starts rejecting rows that were legal before.
 
+## ALTER, and what a migration file is
+
+A dump is not the only thing handed to this converter. A hand-written migration
+is DDL too, and it states most of its schema in `ALTER` rather than in `CREATE`:
+the table arrives narrow and the columns are added afterwards. Every dialect
+used to recognise only the few `ALTER` forms its own dump tool emits, so of
+thirty-three cases across the five dialects, five worked and twenty-eight were
+discarded in silence. `ALTER TABLE ADD COLUMN` was read by one of the five. The
+column did not appear in the output, and nothing said so.
+
+The file is now read as a whole and the `ALTER` statements are replayed onto
+what the `CREATE` statements built, so the schema is the state the file leaves
+behind. That covers adding, dropping and renaming a column, renaming a table,
+changing a column's type, nullability or default, and dropping a constraint,
+in whichever spelling each dialect uses: `MODIFY` against `ALTER COLUMN`,
+Oracle's parenthesised `ADD (a, b)`, MySQL's `CHANGE`, and the `sp_rename` call
+SQL Server uses because it has no `RENAME` statement of its own.
+
+Dropping a column takes its constraints and indexes with it, and renaming one
+moves the name everywhere it is used. A constraint over a column that no longer
+exists cannot be built, so leaving either behind produces a file that fails to
+load.
+
+The replay runs after the `CREATE` statements rather than interleaved with
+them. For a file that creates a table before altering it, which is every dump
+and every migration, the result is the same. The streaming parsers do not
+replay `ALTER` at all: they hand back one object per statement and hold no
+schema for a later statement to change. Whole-file `Parse` is what the CLI
+uses, and the stream is for a dump too large to hold, which is `CREATE`-heavy
+by nature.
+
 Every SQL Server script opens with `SET ANSI_NULLS ON` and
 `SET QUOTED_IDENTIFIER ON`, the way SSMS writes one. Without them a filtered
 index is refused outright, with Msg 1934 naming the setting rather than the
