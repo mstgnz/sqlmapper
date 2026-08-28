@@ -316,6 +316,25 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 			o.schema.Sequences = append(o.schema.Sequences, seq)
 		}
 
+		// GRANT and REVOKE, which arrive as statements of their own.
+		if o.parsePermission(stmt) {
+			continue
+		}
+
+		// CREATE TYPE. parseTypes existed and only the stream parser called it,
+		// so an object type read through this path was dropped while the same
+		// file read a statement at a time kept it. TYPE BODY is the
+		// implementation rather than the declaration and has no shape the schema
+		// model holds.
+		if keyword.HasPrefix(upperStmt, "CREATE TYPE") || keyword.HasPrefix(upperStmt, "CREATE OR REPLACE TYPE") {
+			if !keyword.HasPrefix(upperStmt, "CREATE TYPE BODY") && !keyword.HasPrefix(upperStmt, "CREATE OR REPLACE TYPE BODY") {
+				if err := o.parseTypes(stmt); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
+
 		// CREATE VIEW
 		if strings.HasPrefix(strings.ToUpper(stmt), "CREATE") && strings.Contains(strings.ToUpper(stmt), "VIEW") {
 			view, err := o.parseCreateView(stmt)
@@ -777,6 +796,22 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(";\n\n")
 	}
 
+	// Types come before the tables that declare a column of one. This used to be
+	// written by the stream generator only, so a schema carrying an object type
+	// kept it one way round and lost it the other.
+	for _, typ := range schema.Types {
+		if !schema.TypeIsPortable(typ, sqlmapper.Oracle) {
+			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition))
+			result.WriteString("\n\n")
+			continue
+		}
+		// A type is a PL/SQL block, so SQL*Plus needs the slash: terminated with
+		// a bare semicolon it compiled with errors and swallowed every statement
+		// after it, which is how the tables went missing.
+		result.WriteString(sqlfmt.Terminate(o.generateTypeSQL(typ), ";"))
+		result.WriteString("\n/\n\n")
+	}
+
 	// Dump tools do not order tables by dependency, so a child table can precede
 	// its parent and the foreign key would fail to resolve.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
@@ -827,6 +862,13 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 	// triggers only, and wrote a foreign body as if it were PL/SQL.
 	if routines := o.generateRoutinesSQL(schema); routines != "" {
 		result.WriteString(routines)
+	}
+
+	// Grants come last: they name tables, views and routines, all of which have
+	// to exist before the grant is read.
+	if perms := o.generatePermissionsSQL(schema); perms != "" {
+		result.WriteString("\n")
+		result.WriteString(perms)
 	}
 
 	return result.String(), nil
@@ -904,25 +946,64 @@ func (o *Oracle) parseFunctions(statement string) error {
 	return nil
 }
 
+// oracleTypeRe reads a CREATE TYPE. The name arrives quoted and
+// schema-qualified out of DBMS_METADATA.
+var oracleTypeRe = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+TYPE\s+([."\w]+)\s+(?:AS\s+|IS\s+|UNDER\s+)?(.+?)(?:\s*NOT\s+FINAL)?$`)
+
+// oracleGrantRe reads an object grant. Oracle names the grantee without a host,
+// and both it and the object may be quoted.
+var oracleGrantRe = regexp.MustCompile(`(?i)^\s*GRANT\s+(.+?)\s+ON\s+([."\w]+)\s+TO\s+([."\w]+)(\s+WITH\s+GRANT\s+OPTION)?\s*;?\s*$`)
+
+// oracleRevokeRe reads an object revoke.
+var oracleRevokeRe = regexp.MustCompile(`(?i)^\s*REVOKE\s+(.+?)\s+ON\s+([."\w]+)\s+FROM\s+([."\w]+)\s*;?\s*$`)
+
+// parsePermission reads a GRANT or REVOKE. Nothing read these, so an Oracle
+// schema arrived with no access control at all while PostgreSQL and MySQL kept
+// theirs.
+func (o *Oracle) parsePermission(statement string) bool {
+	if m := oracleGrantRe.FindStringSubmatch(statement); m != nil {
+		o.schema.Permissions = append(o.schema.Permissions, sqlmapper.Permission{
+			Type:       "GRANT",
+			Privileges: sqlmapper.SplitPrivileges(m[1]),
+			Object:     oracleQualifiedName(m[2]),
+			Grantee:    unquoteOracleIdent(m[3]),
+			WithGrant:  strings.TrimSpace(m[4]) != "",
+		})
+		return true
+	}
+	if m := oracleRevokeRe.FindStringSubmatch(statement); m != nil {
+		o.schema.Permissions = append(o.schema.Permissions, sqlmapper.Permission{
+			Type:       "REVOKE",
+			Privileges: sqlmapper.SplitPrivileges(m[1]),
+			Object:     oracleQualifiedName(m[2]),
+			Grantee:    unquoteOracleIdent(m[3]),
+		})
+		return true
+	}
+	return false
+}
+
+// oracleQualifiedName unquotes each half of a possibly schema-qualified name.
+// Trimming the outer quotes alone left "APP"."CUSTOMERS" as app"."customers,
+// because the quotes in the middle are not at either end.
+func oracleQualifiedName(raw string) string {
+	schema, name := splitOracleQualifiedName(raw)
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
+}
+
 func (o *Oracle) parseTypes(statement string) error {
-	re := regexp.MustCompile(`CREATE(?:\s+OR\s+REPLACE)?\s+TYPE\s+([.\w]+)\s+(?:AS\s+|IS\s+|UNDER\s+)?(.+?)(?:NOT\s+FINAL)?$`)
-	matches := re.FindStringSubmatch(statement)
+	// DBMS_METADATA quotes and schema-qualifies the name, and matching only
+	// word characters found nothing at all in a real dump.
+	matches := oracleTypeRe.FindStringSubmatch(statement)
 
 	if len(matches) > 2 {
-		typeName := matches[1]
 		typ := sqlmapper.Type{
-			Definition: matches[2],
+			Definition: strings.TrimSpace(matches[2]),
 		}
-
-		// Parse schema if exists
-		parts := strings.Split(typeName, ".")
-		if len(parts) > 1 {
-			typ.Schema = parts[0]
-			typ.Name = parts[1]
-		} else {
-			typ.Name = typeName
-		}
-
+		typ.Schema, typ.Name = splitOracleQualifiedName(matches[1])
 		o.schema.Types = append(o.schema.Types, typ)
 	}
 
@@ -1288,13 +1369,16 @@ func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
 
 // generateIndexSQL generates SQL for an index
 func (o *Oracle) generateIndexSQL(tableName string, index sqlmapper.Index) string {
-	var sql string
+	// Oracle has no partial index either. A function-based index on a CASE is
+	// the usual stand-in and is not the same object, so the filter is stated
+	// rather than guessed at.
+	sql := sqlfmt.PartialIndexNote(index.Name, index.Condition, index.IsUnique)
 	if index.IsBitmap {
-		sql = "CREATE BITMAP INDEX "
+		sql += "CREATE BITMAP INDEX "
 	} else if index.IsUnique {
-		sql = "CREATE UNIQUE INDEX "
+		sql += "CREATE UNIQUE INDEX "
 	} else {
-		sql = "CREATE INDEX "
+		sql += "CREATE INDEX "
 	}
 
 	sql += index.Name + " ON " + tableName + " (" + strings.Join(index.Columns, ", ") + ")"
@@ -1460,6 +1544,49 @@ func oracleRoutineBody(body string) string {
 		return b
 	}
 	return "IS\n" + b
+}
+
+// generatePermissionsSQL renders the grants the schema carries.
+//
+// Nothing wrote these. Two dialects read a GRANT into the schema and all five
+// dropped it again on the way out, so a converted schema quietly had different
+// access than the one it came from. That is the same defect a dropped comment
+// had, except this one is a security boundary: an application that lost its
+// SELECT grant fails closed, and one that kept a REVOKE it should have lost
+// fails open.
+//
+// The roles named here are not created. They have to exist on the target before
+// the script runs, and the load says so plainly if they do not.
+//
+// Oracle spells the widest object privilege ALL, not ALL PRIVILEGES: the longer
+// form is a system-privilege keyword and ORA-00990 is what a table grant using
+// it returns.
+func (o *Oracle) generatePermissionsSQL(schema *sqlmapper.Schema) string {
+	var sb strings.Builder
+	for _, perm := range schema.Permissions {
+		user, _ := sqlmapper.GranteeParts(perm.Grantee)
+		if user == "" || perm.Object == "" {
+			continue
+		}
+		// The tables are written unqualified, so the grant that names them has
+		// to be too: a grant carried out of PostgreSQL said "ON public.orders",
+		// which names nothing on any other target.
+		object := sqlmapper.StripSchemaPrefix(perm.Object)
+		privs := sqlmapper.PrivilegeList(perm.Privileges)
+		if strings.EqualFold(privs, "ALL PRIVILEGES") {
+			privs = "ALL"
+		}
+		if strings.EqualFold(perm.Type, "REVOKE") {
+			fmt.Fprintf(&sb, "REVOKE %s ON %s FROM %s;\n", privs, object, user)
+			continue
+		}
+		fmt.Fprintf(&sb, "GRANT %s ON %s TO %s", privs, object, user)
+		if perm.WithGrant {
+			sb.WriteString(" WITH GRANT OPTION")
+		}
+		sb.WriteString(";\n")
+	}
+	return sb.String()
 }
 
 // generateViewSQL renders a view definition, without its terminator.

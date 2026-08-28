@@ -148,3 +148,38 @@ func CommentOn(object, name, comment string) string {
 	return fmt.Sprintf("COMMENT ON %s %s IS '%s';", object, name,
 		strings.ReplaceAll(comment, "'", "''"))
 }
+
+// PartialIndexNote states a filter the target cannot hold.
+//
+// MySQL and Oracle have no partial index, so one widens into a full index on
+// the way in, and that is not the same object: a UNIQUE one becomes stricter
+// than the source and starts rejecting rows that were legal before. Dropping
+// the clause silently made that invisible, so the condition is written above
+// the index as a comment.
+func PartialIndexNote(name, condition string, unique bool) string {
+	if condition == "" {
+		return ""
+	}
+	kind := "index"
+	if unique {
+		kind = "unique index"
+	}
+	return fmt.Sprintf("-- %s %s was partial in the source and is not here: WHERE %s\n", kind, name, condition)
+}
+
+// ForeignType states a user-defined type the target cannot build.
+//
+// A type's definition is dialect-specific text in the same way a routine body
+// is: an Oracle OBJECT is not a PostgreSQL composite, and writing one into the
+// other produced "CREATE TYPE addr_t AS (OBJECT (...))", which does not load.
+// It is stated with its provenance rather than emitted broken.
+func ForeignType(source, name, definition string) string {
+	sql := fmt.Sprintf("CREATE TYPE %s AS %s;", name, definition)
+	if source == "" {
+		source = "source"
+	}
+	header := fmt.Sprintf(
+		"Defined by the %s source. A type definition is dialect-specific and is\nnot translated, so it is left commented out. Port it by hand.",
+		source)
+	return Comment(header + "\n\n" + strings.TrimRight(sql, "\n"))
+}

@@ -412,9 +412,14 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	}
 
 	// Write types
+	// A definition that came from another dialect is stated rather than emitted,
+	// the same way the file generator states it.
 	for _, typ := range schema.Types {
-		stmt := p.postgres.generateTypeSQL(typ)
-		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
+		stmt := sqlfmt.Terminate(p.postgres.generateTypeSQL(typ), ";")
+		if !schema.TypeIsPortable(typ, sqlmapper.PostgreSQL) {
+			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition)
+		}
+		if _, err := writer.Write([]byte(stmt + "\n\n")); err != nil {
 			return err
 		}
 	}
@@ -431,6 +436,11 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	// Order the tables the same way Generate does, so a streamed schema loads
 	// even when the source listed a child table before its parent.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
+
+	// The boolean columns are known before anything that filters on them is
+	// written: both an index condition and a view body need them.
+	booleans := p.postgres.booleanColumns(schema)
+
 	for _, table := range tables {
 		stmt := p.postgres.generateTableSQL(table, deferredFKs[table.Name])
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
@@ -439,7 +449,7 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
-			stmt := p.postgres.generateIndexSQL(table.Name, index)
+			stmt := p.postgres.generateIndexSQL(table.Name, index, booleans)
 			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err
 			}
@@ -458,7 +468,6 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 
 	// Views are rendered by the same code the file generator uses, so a body
 	// carrying another dialect's schema qualifier is translated here too.
-	booleans := p.postgres.booleanColumns(schema)
 	for _, view := range schema.Views {
 		stmt := p.postgres.generateViewSQL(view, booleans)
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
@@ -471,6 +480,14 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	// belongs, and the other wrote no routines at all.
 	if routines := p.postgres.generateRoutinesSQL(schema); routines != "" {
 		if _, err := writer.Write([]byte(routines)); err != nil {
+			return err
+		}
+	}
+
+	// Grants are rendered by the same code the file generator uses, and come
+	// last for the same reason: they name objects that have to exist first.
+	if perms := p.postgres.generatePermissionsSQL(schema); perms != "" {
+		if _, err := writer.Write([]byte("\n" + perms)); err != nil {
 			return err
 		}
 	}

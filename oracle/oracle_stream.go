@@ -409,10 +409,16 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		}
 	}
 
-	// Write types
+	// Write types. A definition that came from another dialect is stated rather
+	// than emitted, the same way the file generator states it.
 	for _, typ := range schema.Types {
-		stmt := p.oracle.generateTypeSQL(typ)
-		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
+		// A type is a PL/SQL block and SQL*Plus needs the slash, the same way the
+		// file generator writes it.
+		stmt := sqlfmt.Terminate(p.oracle.generateTypeSQL(typ), ";") + "\n/"
+		if !schema.TypeIsPortable(typ, sqlmapper.Oracle) {
+			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition)
+		}
+		if _, err := writer.Write([]byte(stmt + "\n\n")); err != nil {
 			return err
 		}
 	}
@@ -454,6 +460,14 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 	// with the slash a PL/SQL block needs.
 	if routines := p.oracle.generateRoutinesSQL(schema); routines != "" {
 		if _, err := writer.Write([]byte(routines)); err != nil {
+			return err
+		}
+	}
+
+	// Grants are rendered by the same code the file generator uses, and come
+	// last for the same reason: they name objects that have to exist first.
+	if perms := p.oracle.generatePermissionsSQL(schema); perms != "" {
+		if _, err := writer.Write([]byte("\n" + perms)); err != nil {
 			return err
 		}
 	}

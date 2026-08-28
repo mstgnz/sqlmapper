@@ -138,6 +138,16 @@ DELIMITER ;
 /*!50001 SET character_set_client      = @saved_cs_client */;
 /*!50001 SET character_set_results     = @saved_cs_results */;
 /*!50001 SET collation_connection      = @saved_col_connection */;
+--
+-- A standalone unique index, and the grants for the reporting user. mysqldump
+-- writes a grant only on a full dump with --flush-privileges; both are here
+-- because each was read by something and written by nothing.
+--
+
+CREATE UNIQUE INDEX uq_orders_customer_placed ON orders (customer_id, placed_on);
+GRANT SELECT ON app.customers TO 'reporting'@'%';
+GRANT SELECT, INSERT ON app.orders TO 'reporting'@'%';
+
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;

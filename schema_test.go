@@ -194,3 +194,117 @@ func TestKeyColumns(t *testing.T) {
 	}}
 	assert.Empty(t, KeyColumns(only))
 }
+
+func TestStripSchemaPrefix(t *testing.T) {
+	cases := map[string]string{
+		"customers":         "customers",
+		"public.customers":  "customers",
+		`"APP"."CUSTOMERS"`: "CUSTOMERS",
+		`"public"."orders"`: "orders",
+		"  spaced.name  ":   "name",
+		"a.b.c":             "c",
+		"":                  "",
+	}
+	for in, want := range cases {
+		if got := StripSchemaPrefix(in); got != want {
+			t.Errorf("StripSchemaPrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGranteeParts(t *testing.T) {
+	// MySQL is the only dialect that names a host, and it is the last @ that
+	// separates the two: a user name may contain one.
+	cases := []struct {
+		in         string
+		user, host string
+	}{
+		{"reporting", "reporting", ""},
+		{"reporting@%", "reporting", "%"},
+		{"reporting@localhost", "reporting", "localhost"},
+		{"a@b@c", "a@b", "c"},
+		{"  padded @ % ", "padded", "%"},
+	}
+	for _, c := range cases {
+		user, host := GranteeParts(c.in)
+		if user != c.user || host != c.host {
+			t.Errorf("GranteeParts(%q) = %q,%q, want %q,%q", c.in, user, host, c.user, c.host)
+		}
+	}
+}
+
+func TestPrivilegeRoundTrip(t *testing.T) {
+	// An empty list would render "GRANT  ON t", which no dialect accepts, so it
+	// falls back to the widest privilege rather than writing a statement that
+	// cannot load.
+	if got := PrivilegeList(nil); got != "ALL PRIVILEGES" {
+		t.Errorf("PrivilegeList(nil) = %q", got)
+	}
+	if got := PrivilegeList([]string{"  ", ""}); got != "ALL PRIVILEGES" {
+		t.Errorf("PrivilegeList(blanks) = %q", got)
+	}
+	if got := PrivilegeList([]string{"SELECT", " INSERT "}); got != "SELECT, INSERT" {
+		t.Errorf("PrivilegeList = %q", got)
+	}
+
+	// ALL PRIVILEGES is one privilege, not two, so it survives the split whole.
+	if got := SplitPrivileges("ALL PRIVILEGES"); len(got) != 1 || got[0] != "ALL PRIVILEGES" {
+		t.Errorf("SplitPrivileges(ALL PRIVILEGES) = %v", got)
+	}
+	if got := SplitPrivileges("select , insert"); len(got) != 2 || got[0] != "SELECT" || got[1] != "INSERT" {
+		t.Errorf("SplitPrivileges = %v", got)
+	}
+	if got := SplitPrivileges(" , "); got != nil {
+		t.Errorf("SplitPrivileges(blank) = %v", got)
+	}
+
+	round := PrivilegeList(SplitPrivileges("SELECT, INSERT, UPDATE"))
+	if round != "SELECT, INSERT, UPDATE" {
+		t.Errorf("round trip = %q", round)
+	}
+}
+
+func TestHasUniqueConstraint(t *testing.T) {
+	// It answers for a single-column UNIQUE constraint only: a composite one
+	// does not make either of its columns unique on its own.
+	constraints := []Constraint{
+		{Type: "UNIQUE", Columns: []string{"code"}},
+		{Type: "UNIQUE", Columns: []string{"tenant_id", "slug"}},
+		{Type: "PRIMARY KEY", Columns: []string{"id"}},
+	}
+	if !HasUniqueConstraint(constraints, "code") {
+		t.Error("code carries a single-column UNIQUE")
+	}
+	if !HasUniqueConstraint(constraints, "CODE") {
+		t.Error("the column name is matched without regard to case")
+	}
+	for _, name := range []string{"tenant_id", "slug", "id", "missing"} {
+		if HasUniqueConstraint(constraints, name) {
+			t.Errorf("%q is not uniquely constrained on its own", name)
+		}
+	}
+}
+
+func TestCommentStatementsCoversBothLevels(t *testing.T) {
+	table := Table{
+		Name:    "customers",
+		Comment: "people who buy things",
+		Columns: []Column{
+			{Name: "email", Comment: "login address"},
+			{Name: "note"},
+		},
+	}
+	got := CommentStatements(table)
+	if len(got) != 2 {
+		t.Fatalf("want a table comment and one column comment, got %d: %+v", len(got), got)
+	}
+	if got[0].Object != "TABLE" || got[0].Name != "customers" {
+		t.Errorf("first should be the table: %+v", got[0])
+	}
+	if got[1].Object != "COLUMN" || got[1].Name != "customers.email" {
+		t.Errorf("second should be the column: %+v", got[1])
+	}
+	if len(CommentStatements(Table{Name: "bare"})) != 0 {
+		t.Error("a table with no comments states none")
+	}
+}

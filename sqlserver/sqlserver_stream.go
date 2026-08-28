@@ -20,10 +20,6 @@ type SQLServerStreamParser struct {
 }
 
 // NewSQLServerStreamParser creates a new SQL Server stream parser
-// sqlserverStreamIndexRe reads a standalone CREATE INDEX statement, which the whole-file
-// parser cannot do because it resolves the target table first.
-var sqlserverStreamIndexRe = regexp.MustCompile(`(?i)CREATE\s+(?:(UNIQUE)\s+)?(?:(CLUSTERED|NONCLUSTERED)\s+)?INDEX\s+([.\w\[\]]+)\s+ON\s+([.\w\[\]]+)\s*\((.*?)\)`)
-
 func NewSQLServerStreamParser() *SQLServerStreamParser {
 	return &SQLServerStreamParser{
 		sqlserver: NewSQLServer().(*SQLServer),
@@ -202,6 +198,16 @@ func (p *SQLServerStreamParser) parseStatement(statement string) (*stream.Schema
 			Data: constraint,
 		}, nil
 
+	case keyword.HasPrefix(upperStatement, "CREATE SEQUENCE"):
+		seq, err := p.parseSequenceStatement(statement)
+		if err != nil {
+			return nil, err
+		}
+		return &stream.SchemaObject{
+			Type: stream.SequenceObject,
+			Data: seq,
+		}, nil
+
 	case mssIndexHeaderRe.MatchString(upperStatement):
 		index, err := p.parseIndexStatement(statement)
 		if err != nil {
@@ -220,6 +226,21 @@ func (p *SQLServerStreamParser) parseStatement(statement string) (*stream.Schema
 func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.Writer) error {
 	if schema == nil {
 		return fmt.Errorf("schema cannot be nil")
+	}
+
+	// The same two SET statements the file generator opens with: a filtered
+	// index is refused without QUOTED_IDENTIFIER ON.
+	if _, err := writer.Write([]byte(mssScriptPreamble)); err != nil {
+		return err
+	}
+
+	// Sequences come first, the same way Generate writes them: a column default
+	// may name one.
+	for _, seq := range schema.Sequences {
+		stmt := p.sqlserver.generateSequenceSQL(seq)
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\nGO\n")); err != nil {
+			return err
+		}
 	}
 
 	// Write tables
@@ -255,6 +276,14 @@ func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer 
 	// streamed output and the file output agree.
 	if routines := p.sqlserver.generateRoutinesSQL(schema); routines != "" {
 		if _, err := writer.Write([]byte(routines)); err != nil {
+			return err
+		}
+	}
+
+	// Grants are rendered by the same code the file generator uses, and come
+	// last for the same reason: they name objects that have to exist first.
+	if perms := p.sqlserver.generatePermissionsSQL(schema); perms != "" {
+		if _, err := writer.Write([]byte("\n" + perms)); err != nil {
 			return err
 		}
 	}
@@ -374,21 +403,23 @@ func (p *SQLServerStreamParser) parseTriggerStatement(statement string) (*sqlmap
 
 // parseIndexStatement parses a CREATE INDEX statement
 func (p *SQLServerStreamParser) parseIndexStatement(statement string) (*sqlmapper.Index, error) {
-	// parseIndexes attaches the index to a table that is already present in the
-	// schema, which never holds for a single statement read off the stream, so
-	// the statement is read directly here.
-	m := sqlserverStreamIndexRe.FindStringSubmatch(ensureTerminated(statement))
-	if len(m) < 6 {
-		return nil, fmt.Errorf("no index found in statement")
+	// parseCreateIndex attaches the index to a table that is already present in
+	// the schema, which never holds for a single statement read off the stream,
+	// so the shared reader is called and the table name dropped.
+	index, _, err := readIndex([]byte(ensureTerminated(statement)))
+	if err != nil {
+		return nil, err
 	}
+	return &index, nil
+}
 
-	index := &sqlmapper.Index{
-		Name:        strings.Trim(m[3], "[]"),
-		Columns:     (&SQLServer{}).splitAndTrim(m[5]),
-		IsUnique:    strings.TrimSpace(m[1]) != "",
-		IsClustered: strings.EqualFold(strings.TrimSpace(m[2]), "CLUSTERED"),
+// parseSequenceStatement reads a CREATE SEQUENCE off the stream.
+func (p *SQLServerStreamParser) parseSequenceStatement(statement string) (*sqlmapper.Sequence, error) {
+	seq, err := p.sqlserver.parseCreateSequence([]byte(ensureTerminated(statement)))
+	if err != nil {
+		return nil, err
 	}
-	return index, nil
+	return &seq, nil
 }
 
 // ensureTerminated prepares a single statement handed over by the stream reader

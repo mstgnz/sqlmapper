@@ -570,6 +570,11 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 		s.buf.WriteString(routines)
 	}
 
+	if perms := s.generatePermissionsSQL(schema); perms != "" {
+		s.buf.WriteString("\n")
+		s.buf.WriteString(perms)
+	}
+
 	return s.buf.String(), nil
 }
 
@@ -978,6 +983,32 @@ func singleColumnPK(table sqlmapper.Table) string {
 // the schema. Their names are reserved: SQLite refuses to create one.
 func isSQLiteInternalTable(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), "sqlite_")
+}
+
+// generatePermissionsSQL states the grants SQLite cannot hold.
+//
+// SQLite has no users and no GRANT: access is whoever can open the file. The
+// grants are written as comments rather than dropped, because a schema that
+// silently loses its access control looks converted and is not.
+func (s *SQLite) generatePermissionsSQL(schema *sqlmapper.Schema) string {
+	var sb strings.Builder
+	for _, perm := range schema.Permissions {
+		user, _ := sqlmapper.GranteeParts(perm.Grantee)
+		if user == "" || perm.Object == "" {
+			continue
+		}
+		// The tables are written unqualified, so the grant that names them has
+		// to be too: a grant carried out of PostgreSQL said "ON public.orders",
+		// which names nothing on any other target.
+		object := sqlmapper.StripSchemaPrefix(perm.Object)
+		verb := "GRANT"
+		if strings.EqualFold(perm.Type, "REVOKE") {
+			verb = "REVOKE"
+		}
+		fmt.Fprintf(&sb, "-- not carried, SQLite has no access control: %s %s ON %s -> %s\n",
+			verb, sqlmapper.PrivilegeList(perm.Privileges), object, user)
+	}
+	return sb.String()
 }
 
 // generateViewSQL renders a view definition, without its terminator.

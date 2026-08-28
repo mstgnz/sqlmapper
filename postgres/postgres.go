@@ -270,6 +270,13 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// file generator used to emit none of them, so a schema it had just parsed
 	// came back out with tables referring to a type nothing had created.
 	for _, typ := range schema.Types {
+		// A composite type's definition is another dialect's text, so it is
+		// stated rather than emitted when it did not come from here.
+		if !schema.TypeIsPortable(typ, sqlmapper.PostgreSQL) {
+			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition))
+			result.WriteString("\n\n")
+			continue
+		}
 		result.WriteString(sqlfmt.Terminate(p.generateTypeSQL(typ), ";"))
 		result.WriteString("\n")
 	}
@@ -279,12 +286,16 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString("\n")
 	}
 
+	// The boolean columns are known before anything that filters on them is
+	// written: both an index condition and a view body need them.
+	booleans := p.booleanColumns(schema)
+
 	for _, table := range tables {
 		result.WriteString(p.generateTableSQL(table, deferredFKs[table.Name]))
 		result.WriteString("\n")
 
 		for _, idx := range table.Indexes {
-			result.WriteString(p.generateIndexSQL(table.Name, idx))
+			result.WriteString(p.generateIndexSQL(table.Name, idx, booleans))
 			result.WriteString("\n")
 		}
 	}
@@ -308,7 +319,6 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		}
 	}
 
-	booleans := p.booleanColumns(schema)
 	for _, view := range schema.Views {
 		result.WriteString(p.generateViewSQL(view, booleans))
 		result.WriteString("\n")
@@ -320,7 +330,50 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(routines)
 	}
 
+	// Grants come last: they name tables, views and routines, all of which have
+	// to exist before the grant is read.
+	if perms := p.generatePermissionsSQL(schema); perms != "" {
+		result.WriteString("\n")
+		result.WriteString(perms)
+	}
+
 	return result.String(), nil
+}
+
+// generatePermissionsSQL renders the grants the schema carries.
+//
+// Nothing wrote these. Two dialects read a GRANT into the schema and all five
+// dropped it again on the way out, so a converted schema quietly had different
+// access than the one it came from. That is the same defect a dropped comment
+// had, except this one is a security boundary: an application that lost its
+// SELECT grant fails closed, and one that kept a REVOKE it should have lost
+// fails open.
+//
+// The roles named here are not created. They have to exist on the target before
+// the script runs, and the load says so plainly if they do not.
+func (p *PostgreSQL) generatePermissionsSQL(schema *sqlmapper.Schema) string {
+	var sb strings.Builder
+	for _, perm := range schema.Permissions {
+		user, _ := sqlmapper.GranteeParts(perm.Grantee)
+		if user == "" || perm.Object == "" {
+			continue
+		}
+		// The tables are written unqualified, so the grant that names them has
+		// to be too: a grant carried out of PostgreSQL said "ON public.orders",
+		// which names nothing on any other target.
+		object := sqlmapper.StripSchemaPrefix(perm.Object)
+		privs := sqlmapper.PrivilegeList(perm.Privileges)
+		if strings.EqualFold(perm.Type, "REVOKE") {
+			fmt.Fprintf(&sb, "REVOKE %s ON %s FROM %s;\n", privs, object, user)
+			continue
+		}
+		fmt.Fprintf(&sb, "GRANT %s ON %s TO %s", privs, object, user)
+		if perm.WithGrant {
+			sb.WriteString(" WITH GRANT OPTION")
+		}
+		sb.WriteString(";\n")
+	}
+	return sb.String()
 }
 
 // generateViewSQL renders a view definition. The SELECT body is passed through
@@ -1494,7 +1547,7 @@ func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 	return sb.String()
 }
 
-func (p *PostgreSQL) generateIndexSQL(tableName string, index sqlmapper.Index) string {
+func (p *PostgreSQL) generateIndexSQL(tableName string, index sqlmapper.Index, booleans map[string]bool) string {
 	var sb strings.Builder
 	if index.IsUnique {
 		sb.WriteString("CREATE UNIQUE INDEX ")
@@ -1511,9 +1564,12 @@ func (p *PostgreSQL) generateIndexSQL(tableName string, index sqlmapper.Index) s
 	sb.WriteString("(")
 	sb.WriteString(strings.Join(index.Columns, ", "))
 	sb.WriteString(")")
+	// The condition is translated rather than copied. PostgreSQL is the only
+	// target with a strict boolean, so a filter arriving from SQL Server as
+	// "is_active = 1" is rejected here once the column is declared boolean.
 	if index.Condition != "" {
 		sb.WriteString(" WHERE ")
-		sb.WriteString(index.Condition)
+		sb.WriteString(expr.ConditionWithBooleans(index.Condition, expr.PostgreSQL, booleans))
 	}
 	if index.TableSpace != "" {
 		sb.WriteString(" TABLESPACE ")
@@ -1550,11 +1606,7 @@ func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
 // not survive a hop to MySQL or SQLite, and the bare name is what every dialect
 // resolves through its own default search path.
 func stripSchemaPrefix(name string) string {
-	name = strings.TrimSpace(strings.Trim(name, `"`))
-	if parts := strings.Split(name, "."); len(parts) > 1 {
-		return strings.Trim(parts[len(parts)-1], `"`)
-	}
-	return name
+	return sqlmapper.StripSchemaPrefix(name)
 }
 
 // columnIsAutoIncrement reports whether the named column of table is an

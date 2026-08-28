@@ -227,6 +227,14 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		}
 	}
 
+	// Grants are rendered by the same code the file generator uses, and come
+	// last for the same reason: they name objects that have to exist first.
+	if perms := p.sqlite.generatePermissionsSQL(schema); perms != "" {
+		if _, err := writer.Write([]byte("\n" + perms)); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

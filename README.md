@@ -244,8 +244,8 @@ schema written five ways, each taken from the server's own dump tool after
 loading it. Between them they carry table and column comments, composite and
 self-referencing keys, every referential action, unique and partial and
 composite indexes, checks written both on the column and at the table, views,
-functions, procedures, triggers, sequences, an enum type, an array column, an
-extension and grants.
+functions, procedures, triggers, sequences, an enum type, an object type, an
+array column, an extension and grants.
 
 All twenty-five conversions of those five load into a real server. Eleven of
 them did not when the fixtures were first written, and the fourteen defects
@@ -253,15 +253,44 @@ behind that are what `tests/integration/full_schema_test.go` now holds a line
 against: it records how much of each feature every parser finds and fails if one
 of them starts finding less.
 
+Widening those fixtures to cover what each dialect can actually say turned up
+seven more, all of the same shape: something was read on the way in and dropped
+on the way out. Grants were read by two dialects and written by none. SQL Server
+read no sequence at all, though it has had them since 2012, and dropped the
+filter off a filtered index, which quietly turns a conditional unique index into
+an unconditional one. Oracle read an object type through the stream parser and
+not through the file parser. MySQL read a standalone `CREATE INDEX` through the
+file parser and not through the stream.
+
 Comments travel with the schema. Each dialect states one its own way, which is
 also how it is written back: `COMMENT ON` for PostgreSQL and Oracle, the column
 and table options for MySQL, an extended property for SQL Server. SQLite has
 nowhere to put one, so it keeps them as comments on the file rather than
 dropping them.
 
-Partitioning is the one thing a source can state that nothing carries. It is not
-a small gap: every dialect spells it differently enough that there is little to
-carry between them.
+Grants travel too, and are written the way each dialect names a grantee:
+`'reporting'@'%'` for MySQL, a bare role elsewhere, `ALL` rather than
+`ALL PRIVILEGES` where T-SQL and Oracle insist. SQLite has no access control at
+all, so it states them as comments instead of dropping them. The roles are not
+created: they have to exist on the target before the script runs, and the load
+says so plainly if they do not.
+
+Two things a source can state are not carried. Partitioning is one, and it is
+not a small gap: every dialect spells it differently enough that there is little
+to carry between them. A partial index is the other, on MySQL and Oracle, which
+have none: the index widens into a full one and the dropped filter is written
+above it as a comment, because a conditional unique index that silently becomes
+unconditional starts rejecting rows that were legal before.
+
+Every SQL Server script opens with `SET ANSI_NULLS ON` and
+`SET QUOTED_IDENTIFIER ON`, the way SSMS writes one. Without them a filtered
+index is refused outright, with Msg 1934 naming the setting rather than the
+index.
+
+A user-defined type is carried only within its own dialect. An Oracle `OBJECT`
+is not a PostgreSQL composite, and a definition is dialect-specific text in the
+same way a routine body is, so a foreign one is commented out with its
+provenance rather than emitted broken.
 
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and

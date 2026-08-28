@@ -79,9 +79,9 @@ var fullSchemaWant = map[string]map[string]int{
 		"primary keys": 3, "composite primary keys": 1,
 		"foreign keys": 3, "fk on delete": 3, "fk on update": 2, "self referencing fk": 1,
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
-		"indexes": 2, "composite indexes": 1,
+		"indexes": 3, "unique indexes": 1, "composite indexes": 2,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"enum columns": 1,
+		"enum columns": 1, "permissions": 2,
 	},
 	"oracle": {
 		"tables": 3, "columns": 17, "defaults": 6, "auto increment": 2,
@@ -91,7 +91,7 @@ var fullSchemaWant = map[string]map[string]int{
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
 		"indexes": 3, "unique indexes": 1, "composite indexes": 2,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
-		"sequences": 1,
+		"sequences": 1, "types": 1, "permissions": 2,
 	},
 	"sqlserver": {
 		"tables": 3, "columns": 17, "defaults": 6, "auto increment": 2,
@@ -99,8 +99,9 @@ var fullSchemaWant = map[string]map[string]int{
 		"primary keys": 3, "composite primary keys": 1,
 		"foreign keys": 3, "fk on delete": 2, "fk on update": 1, "self referencing fk": 1,
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
-		"indexes": 3, "unique indexes": 1, "composite indexes": 1,
+		"indexes": 4, "unique indexes": 1, "composite indexes": 1, "partial indexes": 1,
 		"views": 1, "routines": 2, "procedures": 1, "routine parameters": 2, "triggers": 1,
+		"sequences": 1, "permissions": 2,
 	},
 	"sqlite": {
 		"tables": 3, "columns": 18, "defaults": 6, "auto increment": 2,
@@ -354,5 +355,121 @@ func TestCommentsSurviveTheConversion(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestGrantsSurviveTheConversion holds the line on access control.
+//
+// Two dialects read a GRANT into the schema and all five dropped it again on
+// the way out, so a converted schema quietly had different access than the one
+// it came from. That is worse than a dropped comment: an application missing a
+// SELECT grant fails closed, and one keeping a REVOKE it should have lost fails
+// open. SQLite has no access control at all and states the grant as a comment,
+// which is checked the same way.
+func TestGrantsSurviveTheConversion(t *testing.T) {
+	targets := []struct {
+		name string
+		db   func() sqlmapper.Database
+	}{
+		{"postgres", postgres.NewPostgreSQL},
+		{"mysql", mysql.NewMySQL},
+		{"oracle", oracle.NewOracle},
+		{"sqlserver", sqlserver.NewSQLServer},
+		{"sqlite", sqlite.NewSQLite},
+	}
+
+	for _, src := range fullSchemas {
+		schema, err := src.parser().Parse(loadFullSchema(t, src.file))
+		if err != nil {
+			t.Fatalf("%s parse: %v", src.name, err)
+		}
+		if len(schema.Permissions) == 0 {
+			continue // SQLite states none of its own
+		}
+
+		grantee, _ := sqlmapper.GranteeParts(schema.Permissions[0].Grantee)
+		object := sqlmapper.StripSchemaPrefix(schema.Permissions[0].Object)
+
+		for _, target := range targets {
+			t.Run(src.name+"_to_"+target.name, func(t *testing.T) {
+				out, err := target.db().Generate(schema)
+				if err != nil {
+					t.Fatalf("generate: %v", err)
+				}
+				if !strings.Contains(out, grantee) {
+					t.Errorf("the grantee %q did not survive", grantee)
+				}
+				if !strings.Contains(out, object) {
+					t.Errorf("the granted object %q did not survive", object)
+				}
+				// The source's schema qualifier does not survive the hop, and a
+				// grant naming public.orders names nothing on any other target.
+				for _, line := range strings.Split(out, "\n") {
+					upper := strings.ToUpper(strings.TrimSpace(line))
+					if !strings.HasPrefix(upper, "GRANT ") && !strings.HasPrefix(upper, "REVOKE ") {
+						continue
+					}
+					for _, qualifier := range []string{" public.", " app.", " dbo."} {
+						if strings.Contains(line, qualifier) {
+							t.Errorf("a grant kept the source's schema qualifier: %s", line)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestPartialIndexesAreCarriedOrStated checks the one index feature two targets
+// cannot express. PostgreSQL, SQLite and SQL Server all have a filtered index
+// and must write the clause; MySQL and Oracle have none and must say so rather
+// than widening the index in silence.
+func TestPartialIndexesAreCarriedOrStated(t *testing.T) {
+	schema := &sqlmapper.Schema{Tables: []sqlmapper.Table{{
+		Name: "customers",
+		Columns: []sqlmapper.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "email", DataType: "varchar", Length: 255},
+			{Name: "is_active", DataType: "boolean"},
+		},
+		Indexes: []sqlmapper.Index{
+			{Name: "ix_active_email", Columns: []string{"email"}, IsUnique: true, Condition: "is_active"},
+		},
+	}}}
+
+	carries := map[string]func() sqlmapper.Database{
+		"postgres":  postgres.NewPostgreSQL,
+		"sqlite":    sqlite.NewSQLite,
+		"sqlserver": sqlserver.NewSQLServer,
+	}
+	for name, db := range carries {
+		t.Run(name+"_carries_it", func(t *testing.T) {
+			out, err := db().Generate(schema)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if !strings.Contains(strings.ToUpper(out), "WHERE") {
+				t.Errorf("the filter was dropped:\n%s", out)
+			}
+			if strings.Contains(out, "was partial in the source") {
+				t.Errorf("%s can hold the filter and should not be excusing itself:\n%s", name, out)
+			}
+		})
+	}
+
+	states := map[string]func() sqlmapper.Database{
+		"mysql":  mysql.NewMySQL,
+		"oracle": oracle.NewOracle,
+	}
+	for name, db := range states {
+		t.Run(name+"_states_it", func(t *testing.T) {
+			out, err := db().Generate(schema)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if !strings.Contains(out, "was partial in the source") {
+				t.Errorf("%s widened a unique partial index without a word:\n%s", name, out)
+			}
+		})
 	}
 }

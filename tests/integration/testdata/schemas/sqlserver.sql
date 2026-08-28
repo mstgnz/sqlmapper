@@ -73,3 +73,14 @@ BEGIN
     UPDATE c SET created_at = SYSUTCDATETIME() FROM dbo.customers c JOIN inserted i ON i.id = c.id;
 END
 GO
+
+CREATE SEQUENCE dbo.ticket_seq AS BIGINT START WITH 1000 INCREMENT BY 1 MINVALUE 1 MAXVALUE 999999 CACHE 20;
+GO
+
+CREATE NONCLUSTERED INDEX IX_customers_active ON customers (email ASC) WHERE ([is_active] = 1);
+GO
+
+GRANT SELECT ON dbo.customers TO reporting;
+GO
+GRANT SELECT, INSERT ON dbo.orders TO reporting;
+GO

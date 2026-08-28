@@ -121,6 +121,80 @@ type Comment struct {
 	Comment string
 }
 
+// TypeIsPortable reports whether a user-defined type can be built on the given
+// target.
+//
+// An enumeration is a value list and every dialect that has one can build it
+// from that list. Everything else is dialect-specific text, the same way a
+// routine body is, so it only goes out as it stands when the schema came from
+// that dialect. Writing an Oracle OBJECT into PostgreSQL produced
+// "CREATE TYPE addr_t AS (OBJECT (...))", which does not load.
+func (s *Schema) TypeIsPortable(t Type, dialect DatabaseType) bool {
+	if strings.EqualFold(t.Kind, "ENUM") {
+		return true
+	}
+	return s.SourceDialect == "" || s.SourceDialect == dialect
+}
+
+// StripSchemaPrefix reduces a possibly qualified name to its bare form.
+//
+// A grant, a reference or a table name carries the source's schema, and that
+// qualifier does not survive the hop: "public." is meaningless to MySQL, and an
+// Oracle owner prefix is meaningless everywhere else. The bare name is what each
+// dialect resolves through its own default search path, which is also how the
+// table itself is written.
+func StripSchemaPrefix(name string) string {
+	name = strings.TrimSpace(strings.Trim(name, `"`))
+	if parts := strings.Split(name, "."); len(parts) > 1 {
+		return strings.Trim(parts[len(parts)-1], `"`)
+	}
+	return name
+}
+
+// GranteeParts splits a grantee into its user and host halves.
+//
+// MySQL names a grantee as user@host and the other four dialects have no host
+// at all, so a grant read from one and written to another has to be told which
+// half it may keep. Without this a grant converted out of MySQL read
+// "TO reader@%", which no other dialect accepts.
+func GranteeParts(grantee string) (user, host string) {
+	if i := strings.LastIndex(grantee, "@"); i >= 0 {
+		return strings.TrimSpace(grantee[:i]), strings.TrimSpace(grantee[i+1:])
+	}
+	return strings.TrimSpace(grantee), ""
+}
+
+// SplitPrivileges reads a grant's privilege clause back into a list. It is the
+// inverse of PrivilegeList: "SELECT, INSERT" becomes two entries, and
+// "ALL PRIVILEGES" stays one because it is a single privilege, not two.
+func SplitPrivileges(clause string) []string {
+	var out []string
+	for _, p := range strings.Split(clause, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, strings.ToUpper(p))
+		}
+	}
+	return out
+}
+
+// PrivilegeList renders a permission's privileges as one clause.
+//
+// An empty list would produce "GRANT  ON t", which is a syntax error in every
+// dialect, so it falls back to the widest privilege rather than writing a
+// statement that cannot load.
+func PrivilegeList(privs []string) string {
+	parts := make([]string, 0, len(privs))
+	for _, p := range privs {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) == 0 {
+		return "ALL PRIVILEGES"
+	}
+	return strings.Join(parts, ", ")
+}
+
 // CommentStatements lists the comments a table carries, in the order they are
 // written: the table first, then its columns.
 func CommentStatements(table Table) []Comment {

@@ -204,11 +204,7 @@ func isDeferred(deferred []sqlmapper.Constraint, c sqlmapper.Constraint) bool {
 // names through the active database and a PostgreSQL "public." prefix would break
 // the reference outright.
 func stripSchemaPrefix(name string) string {
-	name = strings.TrimSpace(strings.Trim(name, `"`))
-	if parts := strings.Split(name, "."); len(parts) > 1 {
-		return strings.Trim(parts[len(parts)-1], `"`)
-	}
-	return name
+	return sqlmapper.StripSchemaPrefix(name)
 }
 
 // columnIsAutoIncrement reports whether the named column of table is an
@@ -323,7 +319,58 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(routines)
 	}
 
+	// Grants come last: they name tables, views and routines, all of which have
+	// to exist before the grant is read.
+	if perms := m.generatePermissionsSQL(schema); perms != "" {
+		result.WriteString("\n")
+		result.WriteString(perms)
+	}
+
 	return result.String(), nil
+}
+
+// generatePermissionsSQL renders the grants the schema carries.
+//
+// Nothing wrote these. Two dialects read a GRANT into the schema and all five
+// dropped it again on the way out, so a converted schema quietly had different
+// access than the one it came from. That is the same defect a dropped comment
+// had, except this one is a security boundary: an application that lost its
+// SELECT grant fails closed, and one that kept a REVOKE it should have lost
+// fails open.
+//
+// The roles named here are not created. They have to exist on the target before
+// the script runs, and the load says so plainly if they do not.
+//
+// MySQL is the only one of the five that names a host alongside the user. A
+// grant arriving from any other dialect has none, and "TO reader" is a syntax
+// error here, so the wildcard host stands in.
+func (m *MySQL) generatePermissionsSQL(schema *sqlmapper.Schema) string {
+	var sb strings.Builder
+	for _, perm := range schema.Permissions {
+		user, host := sqlmapper.GranteeParts(perm.Grantee)
+		if user == "" || perm.Object == "" {
+			continue
+		}
+		// The tables are written unqualified, so the grant that names them has
+		// to be too: a grant carried out of PostgreSQL said "ON public.orders",
+		// which names nothing on any other target.
+		object := sqlmapper.StripSchemaPrefix(perm.Object)
+		if host == "" {
+			host = "%"
+		}
+		grantee := fmt.Sprintf("'%s'@'%s'", user, host)
+		privs := sqlmapper.PrivilegeList(perm.Privileges)
+		if strings.EqualFold(perm.Type, "REVOKE") {
+			fmt.Fprintf(&sb, "REVOKE %s ON %s FROM %s;\n", privs, object, grantee)
+			continue
+		}
+		fmt.Fprintf(&sb, "GRANT %s ON %s TO %s", privs, object, grantee)
+		if perm.WithGrant {
+			sb.WriteString(" WITH GRANT OPTION")
+		}
+		sb.WriteString(";\n")
+	}
+	return sb.String()
 }
 
 // generateViewSQL renders a view definition. The SELECT body is passed through
@@ -1191,6 +1238,9 @@ func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint, cols map[string]sq
 
 func (m *MySQL) generateIndexSQL(tableName string, index sqlmapper.Index, cols map[string]sqlmapper.Column) string {
 	var sb strings.Builder
+	// MySQL has no partial index at all, so the filter is stated rather than
+	// carried.
+	sb.WriteString(sqlfmt.PartialIndexNote(index.Name, index.Condition, index.IsUnique))
 	if index.IsUnique {
 		sb.WriteString("CREATE UNIQUE INDEX ")
 	} else {

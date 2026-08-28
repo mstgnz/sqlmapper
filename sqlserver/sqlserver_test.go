@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/stream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSQLServer_Parse(t *testing.T) {
@@ -172,7 +174,9 @@ GO`),
 				t.Errorf("Generate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.want != "" {
-				assert.Equal(t, tt.want, strings.TrimSpace(result))
+				// Every script opens with the SET options a filtered index needs,
+				// the way SSMS writes them; the case below is about what follows.
+				assert.Equal(t, tt.want, strings.TrimSpace(strings.TrimPrefix(result, mssScriptPreamble)))
 			}
 		})
 	}
@@ -333,4 +337,142 @@ func TestMSSReferentialAction(t *testing.T) {
 			t.Errorf("mssReferentialAction(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// TestSQLServerSequences pins the object SQL Server has had since 2012 and this
+// package read none of: every sequence in a PostgreSQL or Oracle schema was
+// dropped on the way in and on the way out.
+func TestSQLServerSequences(t *testing.T) {
+	const script = `CREATE TABLE t (id INT);
+GO
+CREATE SEQUENCE dbo.order_seq AS BIGINT START WITH 100 INCREMENT BY 5 MINVALUE 1 MAXVALUE 9999 CACHE 20;
+GO
+CREATE SEQUENCE plain_seq;
+GO
+CREATE SEQUENCE quiet_seq START WITH 7 INCREMENT BY 1 NO CACHE CYCLE;
+GO`
+
+	schema, err := NewSQLServer().Parse(script)
+	require.NoError(t, err)
+	require.Len(t, schema.Sequences, 3)
+
+	full := schema.Sequences[0]
+	assert.Equal(t, "order_seq", full.Name)
+	assert.Equal(t, "dbo", full.Schema)
+	assert.Equal(t, 100, full.StartValue)
+	assert.Equal(t, 5, full.IncrementBy)
+	assert.Equal(t, 1, full.MinValue)
+	assert.Equal(t, 9999, full.MaxValue)
+	assert.Equal(t, 20, full.Cache)
+	assert.False(t, full.Cycle)
+
+	// A sequence with no options at all still starts at one and steps by one,
+	// which is what SQL Server itself does.
+	assert.Equal(t, 1, schema.Sequences[1].StartValue)
+	assert.Equal(t, 1, schema.Sequences[1].IncrementBy)
+
+	// NO CACHE is a cache of none, which the schema carries as one: that is how
+	// PostgreSQL states the same thing.
+	assert.Equal(t, 1, schema.Sequences[2].Cache)
+	assert.True(t, schema.Sequences[2].Cycle)
+
+	out, err := NewSQLServer().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, "CREATE SEQUENCE order_seq AS BIGINT START WITH 100 INCREMENT BY 5")
+	assert.Contains(t, out, "MAXVALUE 9999 CACHE 20")
+	assert.Contains(t, out, "NO CACHE")
+	assert.Contains(t, out, "CYCLE")
+
+	// The stream reads the same statement into the same object.
+	var streamed []sqlmapper.Sequence
+	require.NoError(t, NewSQLServerStreamParser().ParseStream(strings.NewReader(script), func(obj stream.SchemaObject) error {
+		if obj.Type == stream.SequenceObject {
+			streamed = append(streamed, *obj.Data.(*sqlmapper.Sequence))
+		}
+		return nil
+	}))
+	require.Len(t, streamed, 3)
+	assert.Equal(t, schema.Sequences[0], streamed[0])
+}
+
+// TestSQLServerFilteredIndex pins the clause that turns a filtered index into a
+// full one when it is dropped. A filtered UNIQUE index widened that way is
+// stricter than the source and starts rejecting rows that were legal before.
+func TestSQLServerFilteredIndex(t *testing.T) {
+	const script = `CREATE TABLE customers (id INT, email VARCHAR(255), is_active BIT);
+GO
+CREATE UNIQUE NONCLUSTERED INDEX IX_active_email ON dbo.customers (email ASC) WHERE ([is_active] = 1);
+GO
+CREATE NONCLUSTERED INDEX IX_plain ON dbo.customers (id ASC);
+GO`
+
+	schema, err := NewSQLServer().Parse(script)
+	require.NoError(t, err)
+	require.Len(t, schema.Tables, 1)
+	require.Len(t, schema.Tables[0].Indexes, 2)
+
+	filtered := schema.Tables[0].Indexes[0]
+	assert.Equal(t, "IX_active_email", filtered.Name)
+	assert.True(t, filtered.IsUnique)
+	// The brackets are stripped so the other four dialects can read the clause.
+	assert.Equal(t, "is_active = 1", filtered.Condition)
+	assert.Empty(t, schema.Tables[0].Indexes[1].Condition)
+
+	out, err := NewSQLServer().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, "WHERE is_active = 1")
+
+	// The stream used to carry a second regex for the same job, without the
+	// filter, so a filtered index read a statement at a time came back full.
+	var streamed []sqlmapper.Index
+	require.NoError(t, NewSQLServerStreamParser().ParseStream(strings.NewReader(script), func(obj stream.SchemaObject) error {
+		if obj.Type == stream.IndexObject {
+			streamed = append(streamed, *obj.Data.(*sqlmapper.Index))
+		}
+		return nil
+	}))
+	require.Len(t, streamed, 2)
+	assert.Equal(t, "is_active = 1", streamed[0].Condition)
+}
+
+// TestSQLServerPermissions pins access control, which nothing read here and
+// nothing wrote anywhere.
+func TestSQLServerPermissions(t *testing.T) {
+	const script = `CREATE TABLE customers (id INT);
+GO
+GRANT SELECT, INSERT ON dbo.customers TO reporting;
+GO
+GRANT ALL PRIVILEGES ON dbo.customers TO admin WITH GRANT OPTION;
+GO
+REVOKE DELETE ON dbo.customers FROM reporting;
+GO`
+
+	schema, err := NewSQLServer().Parse(script)
+	require.NoError(t, err)
+	require.Len(t, schema.Permissions, 3)
+
+	assert.Equal(t, "GRANT", schema.Permissions[0].Type)
+	assert.Equal(t, []string{"SELECT", "INSERT"}, schema.Permissions[0].Privileges)
+	assert.Equal(t, "dbo.customers", schema.Permissions[0].Object)
+	assert.Equal(t, "reporting", schema.Permissions[0].Grantee)
+	assert.False(t, schema.Permissions[0].WithGrant)
+
+	assert.True(t, schema.Permissions[1].WithGrant)
+	assert.Equal(t, "REVOKE", schema.Permissions[2].Type)
+
+	out, err := NewSQLServer().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, "GRANT SELECT, INSERT ON customers TO reporting;")
+	// T-SQL has no ALL PRIVILEGES: the widest object privilege is ALL.
+	assert.Contains(t, out, "GRANT ALL ON customers TO admin WITH GRANT OPTION;")
+	assert.Contains(t, out, "REVOKE DELETE ON customers FROM reporting;")
+	// The source's schema qualifier names nothing once the table is written bare.
+	assert.NotContains(t, out, "ON dbo.customers")
+
+	// A grant with no grantee or no object is not a statement anything can load.
+	empty, err := NewSQLServer().Generate(&sqlmapper.Schema{
+		Permissions: []sqlmapper.Permission{{Type: "GRANT", Object: "t"}, {Type: "GRANT", Grantee: "x"}},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, empty, "GRANT")
 }

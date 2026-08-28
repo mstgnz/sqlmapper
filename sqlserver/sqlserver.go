@@ -199,6 +199,16 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 				return nil, fmt.Errorf("error parsing CREATE INDEX: %v", err)
 			}
 
+		case bytes.HasPrefix(upperStmt, []byte("GRANT ")), bytes.HasPrefix(upperStmt, []byte("REVOKE ")):
+			s.parsePermission(stmt)
+
+		case keyword.HasPrefixBytes(upperStmt, "CREATE SEQUENCE"):
+			seq, err := s.parseCreateSequence(stmt)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing CREATE SEQUENCE: %v", err)
+			}
+			s.schema.Sequences = append(s.schema.Sequences, seq)
+
 		case bytes.HasPrefix(upperStmt, []byte("ALTER TABLE")):
 			if err := s.parseAlterTable(stmt); err != nil {
 				return nil, fmt.Errorf("error parsing ALTER TABLE: %v", err)
@@ -918,6 +928,18 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 	// its parent and the foreign key would fail to resolve.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
+	// SSMS opens every script it generates with these two, and a filtered index
+	// is refused without them: "CREATE INDEX failed because the following SET
+	// options have incorrect settings: QUOTED_IDENTIFIER" (Msg 1934). An indexed
+	// view and a computed column want the same, so they are stated once at the
+	// top rather than guessed at per statement.
+	s.buf.WriteString(mssScriptPreamble)
+
+	// Sequences come first: a column default may name one.
+	for _, seq := range schema.Sequences {
+		fmt.Fprintf(s.buf, "%s;\nGO\n", s.generateSequenceSQL(seq))
+	}
+
 	// SQL Server batches statements with GO, and some statements are required to
 	// start one: without it CREATE VIEW fails with "CREATE VIEW must be the
 	// first statement in a query batch".
@@ -958,7 +980,131 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 		s.buf.WriteString(routines)
 	}
 
+	// Grants come last: they name tables, views and routines, all of which have
+	// to exist before the grant is read.
+	if perms := s.generatePermissionsSQL(schema); perms != "" {
+		s.buf.WriteString("\n")
+		s.buf.WriteString(perms)
+	}
+
 	return s.buf.String(), nil
+}
+
+// mssGrantRe and mssRevokeRe read an object grant. T-SQL brackets both the
+// object and the grantee, and spells the grant option WITH GRANT OPTION.
+var mssGrantRe = regexp.MustCompile(`(?i)^\s*GRANT\s+(.+?)\s+ON\s+([\[\]."\w]+)\s+TO\s+([\[\]."\w]+)(\s+WITH\s+GRANT\s+OPTION)?\s*;?\s*$`)
+
+var mssRevokeRe = regexp.MustCompile(`(?i)^\s*REVOKE\s+(.+?)\s+ON\s+([\[\]."\w]+)\s+FROM\s+([\[\]."\w]+)\s*;?\s*$`)
+
+// parsePermission reads a GRANT or REVOKE. Nothing read these, so a SQL Server
+// schema arrived with no access control at all while PostgreSQL and MySQL kept
+// theirs.
+func (s *SQLServer) parsePermission(stmt []byte) bool {
+	text := string(bytes.TrimSpace(stmt))
+	if m := mssGrantRe.FindStringSubmatch(text); m != nil {
+		s.schema.Permissions = append(s.schema.Permissions, sqlmapper.Permission{
+			Type:       "GRANT",
+			Privileges: sqlmapper.SplitPrivileges(m[1]),
+			Object:     unbracketIdent(m[2]),
+			Grantee:    unbracketIdent(m[3]),
+			WithGrant:  strings.TrimSpace(m[4]) != "",
+		})
+		return true
+	}
+	if m := mssRevokeRe.FindStringSubmatch(text); m != nil {
+		s.schema.Permissions = append(s.schema.Permissions, sqlmapper.Permission{
+			Type:       "REVOKE",
+			Privileges: sqlmapper.SplitPrivileges(m[1]),
+			Object:     unbracketIdent(m[2]),
+			Grantee:    unbracketIdent(m[3]),
+		})
+		return true
+	}
+	return false
+}
+
+// mssScriptPreamble is what SSMS opens every generated script with. A filtered
+// index is refused without it: "CREATE INDEX failed because the following SET
+// options have incorrect settings: 'QUOTED_IDENTIFIER'" (Msg 1934). An indexed
+// view and a persisted computed column want the same.
+const mssScriptPreamble = "SET ANSI_NULLS ON;\nGO\nSET QUOTED_IDENTIFIER ON;\nGO\n\n"
+
+// mssSequenceNameRe reads the name off a CREATE SEQUENCE, which SSMS brackets
+// and schema-qualifies.
+var mssSequenceNameRe = regexp.MustCompile(`(?i)^\s*CREATE\s+SEQUENCE\s+([\[\]."\w]+)`)
+
+// parseCreateSequence reads a SQL Server sequence.
+//
+// SQL Server has had sequences since 2012 and this package read none of them, so
+// every sequence in a PostgreSQL or Oracle schema was dropped on the way in and
+// on the way out. The options are matched one at a time because SQL Server does
+// not fix their order.
+func (s *SQLServer) parseCreateSequence(stmt []byte) (sqlmapper.Sequence, error) {
+	m := mssSequenceNameRe.FindSubmatch(stmt)
+	if m == nil {
+		return sqlmapper.Sequence{}, fmt.Errorf("invalid CREATE SEQUENCE statement")
+	}
+
+	seq := sqlmapper.Sequence{StartValue: 1, IncrementBy: 1}
+	seq.Name = splitBracketedName(string(m[1]))
+	if raw := string(m[1]); strings.Contains(raw, ".") {
+		seq.Schema = unbracketIdent(strings.SplitN(raw, ".", 2)[0])
+	}
+
+	text := string(stmt)
+	readInt := func(pattern string, target *int) {
+		if v := regexp.MustCompile(pattern).FindStringSubmatch(text); len(v) > 1 {
+			n, err := strconv.Atoi(v[1])
+			if err == nil {
+				*target = n
+			}
+		}
+	}
+	readInt(`(?i)START\s+WITH\s+(-?\d+)`, &seq.StartValue)
+	readInt(`(?i)INCREMENT\s+BY\s+(-?\d+)`, &seq.IncrementBy)
+	readInt(`(?i)(?:^|\s)MINVALUE\s+(-?\d+)`, &seq.MinValue)
+	readInt(`(?i)(?:^|\s)MAXVALUE\s+(-?\d+)`, &seq.MaxValue)
+	readInt(`(?i)(?:^|\s)CACHE\s+(-?\d+)`, &seq.Cache)
+
+	upper := strings.ToUpper(text)
+	seq.Cycle = strings.Contains(upper, "CYCLE") && !strings.Contains(upper, "NO CYCLE")
+	// A cache of one is how the schema states no cache at all, which is what the
+	// other dialects' NOCACHE means.
+	if strings.Contains(upper, "NO CACHE") {
+		seq.Cache = 1
+	}
+
+	return seq, nil
+}
+
+// generateSequenceSQL renders a sequence, without its terminator.
+func (s *SQLServer) generateSequenceSQL(seq sqlmapper.Sequence) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "CREATE SEQUENCE %s AS BIGINT", seq.Name)
+	if seq.StartValue > 0 {
+		fmt.Fprintf(&sb, " START WITH %d", seq.StartValue)
+	}
+	if seq.IncrementBy > 0 {
+		fmt.Fprintf(&sb, " INCREMENT BY %d", seq.IncrementBy)
+	}
+	if seq.MinValue > 0 {
+		fmt.Fprintf(&sb, " MINVALUE %d", seq.MinValue)
+	}
+	if seq.MaxValue > 0 {
+		fmt.Fprintf(&sb, " MAXVALUE %d", seq.MaxValue)
+	}
+	// SQL Server spells it NO CACHE, in two words, and a cache of one is how the
+	// schema carries that from PostgreSQL, which writes CACHE 1 for no cache.
+	switch {
+	case seq.Cache > 1:
+		fmt.Fprintf(&sb, " CACHE %d", seq.Cache)
+	case seq.Cache == 1:
+		sb.WriteString(" NO CACHE")
+	}
+	if seq.Cycle {
+		sb.WriteString(" CYCLE")
+	}
+	return sb.String()
 }
 
 // mssIndexHeaderRe reads a CREATE INDEX header. UNIQUE and CLUSTERED /
@@ -966,11 +1112,21 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 // the header is matched rather than counted.
 var mssIndexHeaderRe = regexp.MustCompile(`(?i)^\s*CREATE\s+(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+([\[\]."\w]+)\s+ON\s+([\[\]."\w]+)\s*\(([^)]*)\)`)
 
-// parseCreateIndex parses a CREATE INDEX statement and adds the index to the appropriate table.
-func (s *SQLServer) parseCreateIndex(stmt []byte) error {
+// mssIndexFilterRe reads the WHERE of a filtered index, which follows the column
+// list and precedes the storage clauses. Losing it turns a filtered index into a
+// full one, and a filtered UNIQUE index into a constraint the source never had:
+// rows that were legal before start failing to insert.
+var mssIndexFilterRe = regexp.MustCompile(`(?i)\)\s*WHERE\s+(.+?)(?:\s+WITH\s*\(|\s+ON\s+[\[\w"]|\s*;|\s*$)`)
+
+// readIndex reads a CREATE INDEX and returns the index with the table it belongs
+// to. Both the whole-file parser and the stream call it. There used to be a
+// second regex in the stream package for the same job, and the pair disagreed:
+// the stream one had no filter clause, so a filtered index read a statement at a
+// time came back as a full one.
+func readIndex(stmt []byte) (sqlmapper.Index, string, error) {
 	m := mssIndexHeaderRe.FindSubmatch(stmt)
 	if m == nil {
-		return fmt.Errorf("invalid CREATE INDEX statement")
+		return sqlmapper.Index{}, "", fmt.Errorf("invalid CREATE INDEX statement")
 	}
 
 	index := sqlmapper.Index{
@@ -979,7 +1135,18 @@ func (s *SQLServer) parseCreateIndex(stmt []byte) error {
 		IsUnique:    len(bytes.TrimSpace(m[1])) > 0,
 		IsClustered: strings.EqualFold(strings.TrimSpace(string(m[2])), "CLUSTERED"),
 	}
-	tableName := splitBracketedName(string(m[4]))
+	if f := mssIndexFilterRe.FindSubmatch(stmt); f != nil {
+		index.Condition = expr.Normalize(string(bytes.TrimSpace(f[1])))
+	}
+	return index, splitBracketedName(string(m[4])), nil
+}
+
+// parseCreateIndex parses a CREATE INDEX statement and adds the index to the appropriate table.
+func (s *SQLServer) parseCreateIndex(stmt []byte) error {
+	index, tableName, err := readIndex(stmt)
+	if err != nil {
+		return err
+	}
 
 	for i, table := range s.schema.Tables {
 		if table.Name == tableName {
@@ -1219,6 +1386,13 @@ func (s *SQLServer) generateIndexSQL(tableName string, index sqlmapper.Index) st
 
 	sql += index.Name + " ON " + tableName + " (" + strings.Join(index.Columns, ", ") + ")"
 
+	// SQL Server calls a partial index a filtered index and spells it the same
+	// way. The condition is translated because the source may write a bare
+	// boolean, which has no type here.
+	if index.Condition != "" {
+		sql += " WHERE " + expr.ConditionWithBooleans(index.Condition, expr.SQLServer, nil)
+	}
+
 	return sql
 }
 
@@ -1331,6 +1505,48 @@ func mssParams(params []sqlmapper.Parameter) string {
 		parts = append(parts, "@"+strings.TrimPrefix(p.Name, "@")+" "+p.DataType)
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// generatePermissionsSQL renders the grants the schema carries.
+//
+// Nothing wrote these. Two dialects read a GRANT into the schema and all five
+// dropped it again on the way out, so a converted schema quietly had different
+// access than the one it came from. That is the same defect a dropped comment
+// had, except this one is a security boundary: an application that lost its
+// SELECT grant fails closed, and one that kept a REVOKE it should have lost
+// fails open.
+//
+// The roles named here are not created. They have to exist on the target before
+// the script runs, and the load says so plainly if they do not.
+//
+// T-SQL has no ALL PRIVILEGES and no WITH GRANT OPTION spelled that way: the
+// widest object privilege is ALL and the grant option is WITH GRANT_OPTION.
+func (s *SQLServer) generatePermissionsSQL(schema *sqlmapper.Schema) string {
+	var sb strings.Builder
+	for _, perm := range schema.Permissions {
+		user, _ := sqlmapper.GranteeParts(perm.Grantee)
+		if user == "" || perm.Object == "" {
+			continue
+		}
+		// The tables are written unqualified, so the grant that names them has
+		// to be too: a grant carried out of PostgreSQL said "ON public.orders",
+		// which names nothing on any other target.
+		object := sqlmapper.StripSchemaPrefix(perm.Object)
+		privs := sqlmapper.PrivilegeList(perm.Privileges)
+		if strings.EqualFold(privs, "ALL PRIVILEGES") {
+			privs = "ALL"
+		}
+		if strings.EqualFold(perm.Type, "REVOKE") {
+			fmt.Fprintf(&sb, "REVOKE %s ON %s FROM %s;\nGO\n", privs, object, user)
+			continue
+		}
+		fmt.Fprintf(&sb, "GRANT %s ON %s TO %s", privs, object, user)
+		if perm.WithGrant {
+			sb.WriteString(" WITH GRANT OPTION")
+		}
+		sb.WriteString(";\nGO\n")
+	}
+	return sb.String()
 }
 
 // generateViewSQL renders a view definition, without its terminator.

@@ -175,6 +175,18 @@ func (p *MySQLStreamParser) parseStatement(statement string) (*stream.SchemaObje
 			Data: procedure,
 		}, nil
 
+	case strings.HasPrefix(upperStatement, "CREATE INDEX"),
+		strings.HasPrefix(upperStatement, "CREATE UNIQUE INDEX"),
+		strings.HasPrefix(upperStatement, "CREATE FULLTEXT INDEX"):
+		index, err := p.parseIndexStatement(statement)
+		if err != nil {
+			return nil, err
+		}
+		return &stream.SchemaObject{
+			Type: stream.IndexObject,
+			Data: index,
+		}, nil
+
 	case strings.HasPrefix(upperStatement, "CREATE TRIGGER"):
 		trigger, err := p.parseTriggerStatement(statement)
 		if err != nil {
@@ -241,6 +253,14 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 		}
 	}
 
+	// Grants are rendered by the same code the file generator uses, and come
+	// last for the same reason: they name objects that have to exist first.
+	if perms := p.mysql.generatePermissionsSQL(schema); perms != "" {
+		if _, err := writer.Write([]byte("\n" + perms)); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -264,6 +284,25 @@ func (p *MySQLStreamParser) parseTableStatement(statement string) (*sqlmapper.Ta
 
 	// Return the first table
 	return &tempSchema.Tables[0], nil
+}
+
+// parseIndexStatement reads a standalone CREATE INDEX.
+//
+// parseIndexes attaches the index to a table already present in the schema,
+// which never holds for a single statement read off the stream, so the header is
+// read directly here. Nothing read one at all on this path: a dump whose indexes
+// are written as statements of their own lost every one of them, while the same
+// file read whole kept them.
+func (p *MySQLStreamParser) parseIndexStatement(statement string) (*sqlmapper.Index, error) {
+	m := mysqlIndexRe.FindStringSubmatch(statement)
+	if len(m) < 5 {
+		return nil, fmt.Errorf("no index found in statement")
+	}
+	return &sqlmapper.Index{
+		Name:     m[2],
+		Columns:  splitAndTrim(m[4]),
+		IsUnique: strings.TrimSpace(m[1]) != "",
+	}, nil
 }
 
 // parseViewStatement parses a CREATE VIEW statement

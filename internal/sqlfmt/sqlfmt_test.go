@@ -145,3 +145,73 @@ func TestCommentOn(t *testing.T) {
 		t.Errorf("no comment means no statement, got %q", got)
 	}
 }
+
+func TestPartialIndexNote(t *testing.T) {
+	// The note exists so a widened index is visible. An index with no filter has
+	// nothing to say and must stay silent, or every ordinary index grows a
+	// comment.
+	if got := PartialIndexNote("ix", "", false); got != "" {
+		t.Errorf("an unfiltered index says nothing, got %q", got)
+	}
+
+	plain := PartialIndexNote("ix_open", "status <> 'shipped'", false)
+	if !strings.Contains(plain, "-- index ix_open was partial in the source") ||
+		!strings.Contains(plain, "WHERE status <> 'shipped'") {
+		t.Errorf("note = %q", plain)
+	}
+
+	// The unique case is the one that matters: widening it makes the index
+	// stricter than the source, so the note has to say which kind it was.
+	unique := PartialIndexNote("uq_open", "is_active", true)
+	if !strings.Contains(unique, "-- unique index uq_open") {
+		t.Errorf("note = %q", unique)
+	}
+	if !strings.HasSuffix(plain, "\n") {
+		t.Error("the note ends with a newline so the index starts on its own line")
+	}
+}
+
+func TestForeignType(t *testing.T) {
+	got := ForeignType("oracle", "addr_t", `OBJECT ("STREET" VARCHAR2(100))`)
+
+	// Every line is commented out: the point is that it must not execute.
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if !strings.HasPrefix(line, "--") {
+			t.Errorf("this line would run: %q", line)
+		}
+	}
+	if !strings.Contains(got, "Defined by the oracle source") {
+		t.Errorf("the note drops its provenance: %q", got)
+	}
+	// The statement is shown as the source wrote it, not as the target would
+	// have mangled it.
+	if !strings.Contains(got, `CREATE TYPE addr_t AS OBJECT ("STREET" VARCHAR2(100));`) {
+		t.Errorf("the note lost the source statement: %q", got)
+	}
+
+	// A schema built by hand carries no source dialect, and the note still has
+	// to name something.
+	if !strings.Contains(ForeignType("", "t", "x"), "Defined by the source") {
+		t.Error("an unknown provenance still reads as a sentence")
+	}
+}
+
+func TestSplitTopLevelCommasBytes(t *testing.T) {
+	// The byte form exists for the parsers that work on []byte, and has to agree
+	// with the string one: a comma inside NUMERIC(10,2) is not a separator.
+	in := `id INT, amount NUMERIC(10,2), note VARCHAR(20) DEFAULT 'a,b'`
+	got := SplitTopLevelCommasBytes([]byte(in))
+	want := SplitTopLevelCommas(in)
+
+	if len(got) != len(want) {
+		t.Fatalf("the two forms disagree: %d vs %d parts", len(got), len(want))
+	}
+	for i := range want {
+		if string(got[i]) != want[i] {
+			t.Errorf("part %d: %q vs %q", i, got[i], want[i])
+		}
+	}
+	if len(want) != 3 {
+		t.Fatalf("want three columns, got %d: %q", len(want), want)
+	}
+}
