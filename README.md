@@ -152,7 +152,7 @@ Be aware of these before you trust the output:
 - **Function, procedure and trigger bodies.** They are procedural code, not DDL, and PL/pgSQL and MySQL's `BEGIN ... END` are different languages, so a body is never rewritten. Converting a database to itself keeps its routines executable; converting to a different one writes each routine out commented, with a note saying where it came from. The output still loads, and nothing is lost silently.
 - **Most of a view body.** The `CREATE VIEW` wrapper and the `WHERE` clause are converted; the select list, the joins and anything else are copied verbatim. A view that calls dialect-specific functions outside the `WHERE` clause will need editing.
 - **Table data.** `INSERT` statements and `COPY` blocks are skipped. This is a schema tool.
-- **Storage and tuning clauses.** Tablespaces, storage parameters, partitioning and engine options survive only where the target has an equivalent.
+- **Storage and tuning clauses.** A tablespace and a storage parameter survive only where the target has an equivalent, and partitioning survives nowhere. MySQL's engine and character set do survive, to MySQL.
 
 The parsers are regular-expression based rather than a full SQL grammar. They are built against the output of `mysqldump` and `pg_dump`, but unusual syntax can still slip through. **Read the generated SQL before running it on anything you care about.**
 
