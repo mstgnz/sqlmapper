@@ -383,7 +383,19 @@ func ensureTerminated(statement string) string {
 
 // orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
 // object keyword.
-var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+// mysqldump writes a view with the attributes it was created with, each in its
+// own version block:
+//
+//	/*!50001 CREATE ALGORITHM=UNDEFINED */
+//	/*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */
+//	/*!50001 VIEW `v` AS select ... */;
+//
+// Folding only OR REPLACE meant the real definition was not recognised as a
+// view at all, and the reader kept the SELECT 1 AS col stand-in mysqldump
+// writes earlier in the file instead.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?` +
+	`(?:\s+ALGORITHM\s*=\s*\S+)?(?:\s+DEFINER\s*=\s*\S+)?` +
+	`(?:\s+SQL\s+SECURITY\s+\w+)?\s+`)
 
 // dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
 // FUNCTION" shifts every fixed prefix, so the optional keywords are folded away

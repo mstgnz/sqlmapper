@@ -55,7 +55,12 @@ func TestParseAndParseStreamAgree(t *testing.T) {
 				case *sqlmapper.Table:
 					streamSchema.Tables = append(streamSchema.Tables, *v)
 				case *sqlmapper.View:
-					streamSchema.Views = append(streamSchema.Views, *v)
+					// A stream reports objects in file order, and a later one
+					// supersedes an earlier one of the same name, which is what
+					// replaying the file does. mysqldump relies on that: it
+					// writes a SELECT 1 AS col stand-in for every view before
+					// the real definition.
+					streamSchema.Views = replaceView(streamSchema.Views, *v)
 				case *sqlmapper.Index:
 					streamSchema.Tables[0].Indexes = append(streamSchema.Tables[0].Indexes, *v)
 				case *sqlmapper.Constraint:
@@ -91,7 +96,7 @@ func schemaShape(s *sqlmapper.Schema, looseConstraints []string) string {
 	}
 	constraints = append(constraints, looseConstraints...)
 	for _, v := range s.Views {
-		views = append(views, v.Name)
+		views = append(views, v.Name+" AS "+strings.Join(strings.Fields(v.Definition), " "))
 	}
 
 	var b strings.Builder
@@ -100,6 +105,18 @@ func schemaShape(s *sqlmapper.Schema, looseConstraints []string) string {
 		fmt.Fprintf(&b, "%v\n", set)
 	}
 	return b.String()
+}
+
+// replaceView puts a view in the list, replacing any earlier one of the same
+// name, the way a schema built from the file ends up.
+func replaceView(views []sqlmapper.View, v sqlmapper.View) []sqlmapper.View {
+	for i := range views {
+		if views[i].Name == v.Name {
+			views[i] = v
+			return views
+		}
+	}
+	return append(views, v)
 }
 
 func constraintKey(c sqlmapper.Constraint) string {

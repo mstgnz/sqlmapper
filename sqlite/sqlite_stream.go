@@ -252,20 +252,20 @@ func (p *SQLiteStreamParser) parseTableStatement(statement string) (*sqlmapper.T
 
 // parseViewStatement parses a CREATE VIEW statement
 func (p *SQLiteStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &SQLite{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	// They disagreed about the trailing semicolon, and a pair of readers that
+	// disagree about anything eventually disagrees about something that matters.
+	localParser := &SQLite{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
+	view, err := localParser.parseCreateView([]byte(statement))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Views) == 0 {
+	if view.Name == "" || view.Definition == "" {
 		return nil, fmt.Errorf("no view found in statement")
 	}
 
-	return &tempSchema.Views[0], nil
+	return &view, nil
 }
 
 // parseIndexStatement parses a CREATE INDEX statement
@@ -288,20 +288,18 @@ func (p *SQLiteStreamParser) parseIndexStatement(statement string) (*sqlmapper.I
 
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *SQLiteStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &SQLite{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	localParser := &SQLite{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
+	trigger, err := localParser.parseCreateTrigger([]byte(statement))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Triggers) == 0 {
+	if trigger.Name == "" {
 		return nil, fmt.Errorf("no trigger found in statement")
 	}
 
-	return &tempSchema.Triggers[0], nil
+	return &trigger, nil
 }
 
 // ensureTerminated prepares a single statement handed over by the stream reader

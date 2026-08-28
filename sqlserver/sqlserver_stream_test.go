@@ -175,3 +175,21 @@ func TestSQLServerStreamParser_SerialAndParallelAgree(t *testing.T) {
 		})
 	}
 }
+
+// SQL Server writes CREATE OR ALTER, not CREATE OR REPLACE, and has done since
+// 2016 SP1. Folding the form it does not use left the statement unrecognised
+// and the view was dropped without a word.
+func TestSQLServerStreamParser_CreateOrAlter(t *testing.T) {
+	const script = "CREATE TABLE [dbo].[users]([id] [int] NULL)\nGO\n" +
+		"CREATE OR ALTER VIEW [dbo].[active] AS SELECT id FROM dbo.users\nGO\n"
+
+	var views []string
+	err := NewSQLServerStreamParser().ParseStream(strings.NewReader(script), func(obj stream.SchemaObject) error {
+		if v, ok := obj.Data.(*sqlmapper.View); ok {
+			views = append(views, v.Name)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"active"}, views)
+}

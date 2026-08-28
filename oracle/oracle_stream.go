@@ -325,38 +325,34 @@ func (p *OracleStreamParser) parseProcedureStatement(statement string) (*sqlmapp
 
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *OracleStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &Oracle{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	localParser := &Oracle{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
+	trigger, err := localParser.parseCreateTrigger(strings.Join(strings.Fields(statement), " "))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Triggers) == 0 {
+	if trigger.Name == "" {
 		return nil, fmt.Errorf("no trigger found in statement")
 	}
 
-	return &tempSchema.Triggers[0], nil
+	return &trigger, nil
 }
 
 // parseSequenceStatement parses a CREATE SEQUENCE statement
 func (p *OracleStreamParser) parseSequenceStatement(statement string) (*sqlmapper.Sequence, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &Oracle{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	localParser := &Oracle{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseSequences(ensureTerminated(statement)); err != nil {
+	sequence, err := localParser.parseCreateSequence(strings.Join(strings.Fields(statement), " "))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Sequences) == 0 {
+	if sequence.Name == "" {
 		return nil, fmt.Errorf("no sequence found in statement")
 	}
 
-	return &tempSchema.Sequences[0], nil
+	return &sequence, nil
 }
 
 // parseTypeStatement parses a CREATE TYPE statement

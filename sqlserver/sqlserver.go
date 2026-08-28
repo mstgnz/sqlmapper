@@ -1028,21 +1028,21 @@ func (s *SQLServer) parseAlterTable(stmt []byte) error {
 }
 
 // parseCreateView parses a CREATE VIEW statement and returns a View structure.
+// mssViewHeaderRe reads the view name, allowing the OR ALTER SQL Server writes
+// for a view that may already exist.
+var mssViewHeaderRe = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+([\[\]."\w]+)`)
+
 func (s *SQLServer) parseCreateView(stmt []byte) (sqlmapper.View, error) {
 	view := sqlmapper.View{}
 
-	// Extract view name
-	parts := bytes.Fields(stmt)
-	if len(parts) < 3 {
+	// Extract view name. Reading the third field breaks on CREATE OR ALTER
+	// VIEW, which SQL Server has written since 2016 SP1: the name is the fifth
+	// field there and the third is ALTER.
+	m := mssViewHeaderRe.FindSubmatch(stmt)
+	if m == nil {
 		return view, fmt.Errorf("invalid CREATE VIEW statement")
 	}
-
-	viewName := string(bytes.Trim(parts[2], "[]"))
-	// Remove schema prefix if exists
-	if idx := bytes.LastIndex(parts[2], []byte(".")); idx != -1 {
-		viewName = string(bytes.Trim(parts[2][idx+1:], "[]"))
-	}
-	view.Name = viewName
+	view.Name = splitBracketedName(string(m[1]))
 
 	// Extract view definition
 	if idx := bytes.Index(bytes.ToUpper(stmt), []byte(" AS ")); idx != -1 {
@@ -1170,34 +1170,6 @@ func (s *SQLServer) parseFunctions(statement string) error {
 		}
 
 		s.schema.Functions = append(s.schema.Functions, function)
-	}
-
-	return nil
-}
-
-func (s *SQLServer) parseTriggers(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+TRIGGER\s+([.\w\[\]]+)\s+ON\s+([.\w\[\]]+)\s+(AFTER|INSTEAD\s+OF|FOR)\s+(INSERT|UPDATE|DELETE)(?:\s*,\s*(INSERT|UPDATE|DELETE))*\s+AS\s+BEGIN\s+(.*?)\s+END`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 6 {
-		triggerName := matches[1]
-		trigger := sqlmapper.Trigger{
-			Table:  matches[2],
-			Timing: matches[3],
-			Event:  matches[4],
-			Body:   matches[6],
-		}
-
-		// Parse schema if exists
-		parts := strings.Split(strings.Trim(triggerName, "[]"), ".")
-		if len(parts) > 1 {
-			trigger.Schema = parts[0]
-			trigger.Name = parts[1]
-		} else {
-			trigger.Name = triggerName
-		}
-
-		s.schema.Triggers = append(s.schema.Triggers, trigger)
 	}
 
 	return nil

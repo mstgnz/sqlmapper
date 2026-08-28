@@ -132,6 +132,13 @@ own rather than attached to a table.
 
 `GenerateStream` and `Generate` write the same SQL, statement for statement.
 
+Objects arrive in file order, and a later one supersedes an earlier one of the
+same name, which is what replaying the file would do. `mysqldump` relies on
+that: it writes a `SELECT 1 AS col` stand-in for every view early on, so that
+anything referring to it can be created, and the real definition at the end. A
+consumer building a schema keeps the last of each name, which is what `Parse`
+does.
+
 `tests/integration/stream_agreement_test.go` holds both pairs side by side for
 every dialect, so one drifting from the other fails the build.
 

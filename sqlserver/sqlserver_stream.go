@@ -358,20 +358,18 @@ func (p *SQLServerStreamParser) parseProcedureStatement(statement string) (*sqlm
 
 // parseTriggerStatement parses a CREATE TRIGGER statement
 func (p *SQLServerStreamParser) parseTriggerStatement(statement string) (*sqlmapper.Trigger, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &SQLServer{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	localParser := &SQLServer{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseTriggers(ensureTerminated(statement)); err != nil {
+	trigger, err := localParser.parseCreateTrigger([]byte(statement))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Triggers) == 0 {
+	if trigger.Name == "" {
 		return nil, fmt.Errorf("no trigger found in statement")
 	}
 
-	return &tempSchema.Triggers[0], nil
+	return &trigger, nil
 }
 
 // parseIndexStatement parses a CREATE INDEX statement
@@ -410,7 +408,10 @@ func ensureTerminated(statement string) string {
 
 // orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
 // object keyword.
-var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+// SQL Server writes CREATE OR ALTER, not CREATE OR REPLACE, and has done since
+// 2016 SP1. Folding the form it does not use left a CREATE OR ALTER VIEW
+// unrecognised.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+(?:ALTER|REPLACE))?\s+`)
 
 // dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
 // FUNCTION" shifts every fixed prefix, so the optional keywords are folded away

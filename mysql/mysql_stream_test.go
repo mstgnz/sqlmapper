@@ -282,3 +282,33 @@ func TestMySQLStreamParser_SerialAndParallelAgree(t *testing.T) {
 		})
 	}
 }
+
+// mysqldump writes every view twice: a SELECT 1 AS col stand-in early on so
+// that anything referring to it can be created, then the real definition at the
+// end, carrying the attributes the view was created with. Folding only
+// OR REPLACE left the real one unrecognised, so the reader kept the stand-in.
+func TestMySQLStreamParser_RealDumpViewDefinition(t *testing.T) {
+	const dump = "CREATE TABLE `users` (`id` int, `email` varchar(255), `status` varchar(20));\n" +
+		"/*!50001 DROP VIEW IF EXISTS `active_users`*/;\n" +
+		"/*!50001 CREATE VIEW `active_users` AS SELECT \n 1 AS `id`,\n 1 AS `email`*/;\n" +
+		"/*!50001 CREATE ALGORITHM=UNDEFINED */\n" +
+		"/*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */\n" +
+		"/*!50001 VIEW `active_users` AS select `users`.`id` AS `id`,`users`.`email` AS `email` " +
+		"from `users` where (`users`.`status` = 'active') */;\n"
+
+	var views []*sqlmapper.View
+	err := NewMySQLStreamParser().ParseStream(strings.NewReader(dump), func(obj stream.SchemaObject) error {
+		if v, ok := obj.Data.(*sqlmapper.View); ok {
+			views = append(views, v)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Both are reported, in file order. A later object supersedes an earlier one
+	// of the same name, which is what replaying the file does.
+	require.Len(t, views, 2)
+	assert.Contains(t, views[0].Definition, "1 AS id", "the stand-in comes first")
+	assert.Contains(t, views[1].Definition, "from users", "the real definition comes last")
+	assert.Contains(t, views[1].Definition, "'active'")
+}

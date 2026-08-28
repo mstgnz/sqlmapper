@@ -523,65 +523,6 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 	return s.buf.String(), nil
 }
 
-func (s *SQLite) parseViews(statement string) error {
-	re := regexp.MustCompile(`CREATE(?:\s+TEMP|\s+TEMPORARY)?\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+AS\s+(.+)$`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 2 {
-		viewName := matches[1]
-		view := sqlmapper.View{
-			Definition: matches[2],
-		}
-
-		// Parse schema if exists
-		parts := strings.Split(viewName, ".")
-		if len(parts) > 1 {
-			view.Schema = parts[0]
-			view.Name = parts[1]
-		} else {
-			view.Name = viewName
-		}
-
-		s.schema.Views = append(s.schema.Views, view)
-	}
-
-	return nil
-}
-
-// streamTriggerRe reads a whole CREATE TRIGGER statement. It is dot-matches-all
-// because a trigger body spans lines, and the previous pattern silently matched
-// nothing at all for any trigger written the way SQLite writes them.
-var streamTriggerRe = regexp.MustCompile(`(?is)CREATE\s+TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(DELETE|INSERT|UPDATE(?:\s+OF\s+[\w\s,]+?)?)\s+ON\s+([.\w]+)(?:\s+FOR\s+EACH\s+ROW)?(?:\s+WHEN\s+(.*?))?\s+BEGIN\b(.*)\bEND\s*;?\s*$`)
-
-func (s *SQLite) parseTriggers(statement string) error {
-	matches := streamTriggerRe.FindStringSubmatch(statement)
-
-	if len(matches) > 6 {
-		triggerName := matches[1]
-		trigger := sqlmapper.Trigger{
-			Timing:     strings.ToUpper(matches[2]),
-			Event:      strings.ToUpper(matches[3]),
-			Table:      matches[4],
-			Condition:  strings.TrimSpace(matches[5]),
-			Body:       strings.TrimSpace(matches[6]),
-			ForEachRow: strings.Contains(strings.ToUpper(statement), "FOR EACH ROW"),
-		}
-
-		// Parse schema if exists
-		parts := strings.Split(triggerName, ".")
-		if len(parts) > 1 {
-			trigger.Schema = parts[0]
-			trigger.Name = parts[1]
-		} else {
-			trigger.Name = triggerName
-		}
-
-		s.schema.Triggers = append(s.schema.Triggers, trigger)
-	}
-
-	return nil
-}
-
 // generateTableSQL generates SQL for a table
 func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Constraint) string {
 	var sb strings.Builder
