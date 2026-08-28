@@ -222,11 +222,17 @@ this matrix rather than by reading documentation:
   `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ ... $$`, where
   hand-written SQL usually puts `LANGUAGE` after it.
 
-Routines were verified the same way: a trigger taken out of MySQL 8.4 and a
-trigger plus its function taken out of PostgreSQL 17, converted back to their
-own dialect, loaded into a fresh database and then fired by an `INSERT` to
-confirm they still run. Converted to a different dialect, the same routines come
-out commented and the file still loads.
+- `DBMS_METADATA` writes `EDITIONABLE` between `REPLACE` and the object keyword,
+  leaves a constraint unnamed when the schema did, and hangs the whole storage
+  clause off `USING INDEX`. SSMS brackets a routine name and qualifies it,
+  `[dbo].[bump]`.
+
+Routines were verified the same way, in all four dialects that have them: a
+trigger and a function taken out of MySQL 8.4, PostgreSQL 17, Oracle 23ai and
+SQL Server 2022 with that server's own tool, converted back to their own
+dialect, loaded into a fresh database, and then fired by an `INSERT` and called
+directly to confirm they still run. Converted to a different dialect, the same
+routines come out commented and the file still loads.
 
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and

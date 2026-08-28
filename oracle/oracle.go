@@ -28,9 +28,15 @@ var oracleTypeWithLenRe = regexp.MustCompile(`^(\w+)\s*\(\s*(\d+)(?:\s*,\s*(\d+)
 // and spells identity columns out in full. These patterns strip that back to
 // something the shared schema model can hold.
 var (
-	oracleEnableRe     = regexp.MustCompile(`(?i)\s+(?:ENABLE|DISABLE)\b`)
-	oracleUsingIndexRe = regexp.MustCompile(`(?i)\s+USING\s+INDEX\b`)
-	oracleIdentityRe   = regexp.MustCompile(`(?i)\s*GENERATED\s+(?:ALWAYS|BY\s+DEFAULT(?:\s+ON\s+NULL)?)\s+AS\s+IDENTITY` +
+	oracleEnableRe = regexp.MustCompile(`(?i)\s+(?:ENABLE|DISABLE)\b`)
+	// DBMS_METADATA writes USING INDEX with the whole storage clause behind it:
+	// USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 TABLESPACE "USERS". Only
+	// the keywords were removed before, so the storage words stayed and were
+	// read as part of the key.
+	oracleUsingIndexRe = regexp.MustCompile(`(?i)\s+USING\s+INDEX\b` +
+		`(?:\s+(?:PCTFREE|PCTUSED|INITRANS|MAXTRANS|COMPUTE\s+STATISTICS|NOCOMPRESS|` +
+		`LOGGING|NOLOGGING|STORAGE\s*\([^)]*\)|TABLESPACE\s+"?[\w$#]+"?)\s*\d*)*`)
+	oracleIdentityRe = regexp.MustCompile(`(?i)\s*GENERATED\s+(?:ALWAYS|BY\s+DEFAULT(?:\s+ON\s+NULL)?)\s+AS\s+IDENTITY` +
 		`(?:\s*\([^)]*\))?` +
 		`(?:\s+(?:MINVALUE|MAXVALUE|INCREMENT\s+BY|START\s+WITH|CACHE|NOCACHE|ORDER|NOORDER|CYCLE|NOCYCLE|KEEP|NOKEEP|SCALE|NOSCALE|EXTEND|NOEXTEND|SESSION|GLOBAL)(?:\s+-?\d+)?)*`)
 	oracleSpaceBeforeParenRe = regexp.MustCompile(`\s+\(`)
@@ -179,6 +185,12 @@ func oracleIntegerWidth(precision int) string {
 	}
 }
 
+// oracleAnonymousConstraintRe matches a table constraint written without a name.
+var oracleAnonymousConstraintRe = regexp.MustCompile(`(?i)^(?:PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CHECK)\b`)
+
+// oracleConstraintNameRe reads the name off a named constraint.
+var oracleConstraintNameRe = regexp.MustCompile(`(?i)^CONSTRAINT\s+("?[\w$#]+"?)`)
+
 // normalizeOracleDDL removes the noise DBMS_METADATA adds around real DDL:
 // trailing ENABLE/DISABLE flags and USING INDEX clauses carry no information the
 // schema model keeps, and both break naive attribute matching.
@@ -288,6 +300,14 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 			o.schema.Views = append(o.schema.Views, view)
 		}
 
+		// CREATE FUNCTION and CREATE PROCEDURE. These were read by the stream
+		// parser only, so a dump converted through this path lost them.
+		if oracleRoutineRe.MatchString(stmt) {
+			if err := o.parseFunctions(stmt); err != nil {
+				return nil, fmt.Errorf("error parsing routine: %v", err)
+			}
+		}
+
 		// CREATE TRIGGER
 		if strings.HasPrefix(strings.ToUpper(stmt), "CREATE") && strings.Contains(strings.ToUpper(stmt), "TRIGGER") {
 			trigger, err := o.parseCreateTrigger(stmt)
@@ -345,14 +365,19 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 
 	for _, colDef := range columnDefs {
 		colDef = strings.TrimSpace(colDef)
-		if strings.HasPrefix(colDef, "CONSTRAINT") {
+		// DBMS_METADATA names a constraint only when the schema did. An unnamed
+		// PRIMARY KEY (...) at table level used to fall through to the column
+		// parser, which read the word PRIMARY as a column name.
+		named := strings.HasPrefix(strings.ToUpper(colDef), "CONSTRAINT")
+		if named || oracleAnonymousConstraintRe.MatchString(colDef) {
 			constraint := sqlmapper.Constraint{}
 
-			// Read the constraint name
-			nameRegex := regexp.MustCompile(`(?i)CONSTRAINT\s+("?[\w]+"?)`)
-			matches := nameRegex.FindStringSubmatch(colDef)
-			if len(matches) > 1 {
-				constraint.Name = unquoteOracleIdent(matches[1])
+			// Read the constraint name, which an anonymous one does not have.
+			if named {
+				matches := oracleConstraintNameRe.FindStringSubmatch(colDef)
+				if len(matches) > 1 {
+					constraint.Name = unquoteOracleIdent(matches[1])
+				}
 			}
 
 			if strings.Contains(colDef, "PRIMARY KEY") {
@@ -606,18 +631,24 @@ func (o *Oracle) parseCreateView(stmt string) (sqlmapper.View, error) {
 // Returns:
 //   - sqlmapper.Trigger: The parsed trigger structure
 //   - error: An error if parsing fails
+//
+// oracleTriggerNameRe reads the trigger name, which DBMS_METADATA writes quoted
+// and schema-qualified, with EDITIONABLE in front of the keyword.
+var oracleTriggerNameRe = regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?TRIGGER\s+([."\w$#]+)`)
+
 func (o *Oracle) parseCreateTrigger(stmt string) (sqlmapper.Trigger, error) {
 	trigger := sqlmapper.Trigger{}
 
 	// Read the trigger name, which may be schema-qualified. Matching only \w
 	// truncated "app.users_bi" to "app".
-	triggerNameRegex := regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([.\w]+)`)
-	matches := triggerNameRegex.FindStringSubmatch(stmt)
+	matches := oracleTriggerNameRe.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
 		trigger.Name = matches[1]
 		if parts := strings.Split(trigger.Name, "."); len(parts) > 1 {
-			trigger.Schema = parts[0]
-			trigger.Name = parts[1]
+			trigger.Schema = unquoteOracleIdent(parts[0])
+			trigger.Name = unquoteOracleIdent(parts[1])
+		} else {
+			trigger.Name = unquoteOracleIdent(trigger.Name)
 		}
 	}
 
@@ -638,13 +669,14 @@ func (o *Oracle) parseCreateTrigger(stmt string) (sqlmapper.Trigger, error) {
 	}
 
 	// Read the table name, dropping any schema qualifier.
-	tableRegex := regexp.MustCompile(`(?i)\sON\s+([.\w]+)`)
+	tableRegex := regexp.MustCompile(`(?i)\sON\s+([."\w$#]+)`)
 	matches = tableRegex.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
 		trigger.Table = matches[1]
 		if parts := strings.Split(trigger.Table, "."); len(parts) > 1 {
 			trigger.Table = parts[1]
 		}
+		trigger.Table = unquoteOracleIdent(trigger.Table)
 	}
 
 	// Check for FOR EACH ROW
@@ -833,16 +865,25 @@ func (o *Oracle) parseViews(statement string) error {
 	return nil
 }
 
-func (o *Oracle) parseFunctions(statement string) error {
-	re := regexp.MustCompile(`CREATE(?:\s+OR\s+REPLACE)?\s+(FUNCTION|PROCEDURE)\s+([.\w]+)\s*\((.*?)\)(?:\s+RETURN\s+(\w+))?\s+IS|AS\s+(.*?)(?:END\s+\w+)?$`)
-	matches := re.FindStringSubmatch(statement)
+// oracleRoutineRe reads a CREATE FUNCTION or CREATE PROCEDURE as DBMS_METADATA
+// writes it: EDITIONABLE in front of the keyword, a quoted schema-qualified
+// name, and the body after IS or AS running to the end of the block.
+//
+// The previous pattern had an unparenthesised alternation, so "IS" and
+// "AS ... $" were the two branches and the whole left-hand side was optional.
+var oracleRoutineRe = regexp.MustCompile(`(?is)CREATE(?:\s+OR\s+REPLACE)?` +
+	`(?:\s+(?:NON)?EDITIONABLE)?\s+(FUNCTION|PROCEDURE)\s+([."\w$#]+)` +
+	`\s*(?:\((.*?)\))?\s*(?:RETURN\s+([\w$#]+(?:\s*\([^)]*\))?))?\s+(?:IS|AS)\s+(.*)$`)
 
-	if len(matches) > 4 {
-		isProc := matches[1] == "PROCEDURE"
+func (o *Oracle) parseFunctions(statement string) error {
+	matches := oracleRoutineRe.FindStringSubmatch(statement)
+
+	if len(matches) > 5 {
+		isProc := strings.EqualFold(matches[1], "PROCEDURE")
 		functionName := matches[2]
 		function := sqlmapper.Function{
 			IsProc: isProc,
-			Body:   matches[5],
+			Body:   strings.TrimSpace(matches[5]),
 		}
 
 		if !isProc {
@@ -852,21 +893,23 @@ func (o *Oracle) parseFunctions(statement string) error {
 		// Parse schema if exists
 		parts := strings.Split(functionName, ".")
 		if len(parts) > 1 {
-			function.Schema = parts[0]
-			function.Name = parts[1]
+			function.Schema = unquoteOracleIdent(parts[0])
+			function.Name = unquoteOracleIdent(parts[1])
 		} else {
-			function.Name = functionName
+			function.Name = unquoteOracleIdent(functionName)
 		}
 
-		// Parse parameters
+		// Parse parameters. Oracle writes the direction after the name, as
+		// "v IN NUMBER", so reading the second word as the type gave IN.
 		if matches[3] != "" {
 			params := strings.Split(matches[3], ",")
 			for _, param := range params {
-				parts := strings.Fields(strings.TrimSpace(param))
+				parts := oracleParamFields(param)
 				if len(parts) >= 2 {
 					parameter := sqlmapper.Parameter{
-						Name:     parts[0],
-						DataType: parts[1],
+						Name:      parts[0],
+						Direction: parts[1],
+						DataType:  parts[2],
 					}
 					function.Parameters = append(function.Parameters, parameter)
 				}
@@ -1410,16 +1453,16 @@ func (o *Oracle) generateRoutinesSQL(schema *sqlmapper.Schema) string {
 	for _, fn := range schema.Functions {
 		if fn.IsProc {
 			stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE PROCEDURE %s(%s)\n%s",
-				fn.Name, routine.Params(fn.Parameters), strings.TrimSpace(fn.Body)))
+				fn.Name, oracleParams(fn.Parameters), oracleRoutineBody(fn.Body)))
 			continue
 		}
 		stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE FUNCTION %s(%s) RETURN %s\n%s",
-			fn.Name, routine.Params(fn.Parameters), fn.Returns, strings.TrimSpace(fn.Body)))
+			fn.Name, oracleParams(fn.Parameters), fn.Returns, oracleRoutineBody(fn.Body)))
 	}
 
 	for _, pr := range schema.Procedures {
 		stmts = append(stmts, fmt.Sprintf("CREATE OR REPLACE PROCEDURE %s(%s)\n%s",
-			pr.Name, routine.Params(pr.Parameters), strings.TrimSpace(pr.Body)))
+			pr.Name, oracleParams(pr.Parameters), oracleRoutineBody(pr.Body)))
 	}
 
 	for _, tr := range schema.Triggers {
@@ -1447,4 +1490,56 @@ func oracleIsCharacterType(rendered string) bool {
 		return true
 	}
 	return false
+}
+
+// oracleParamFields splits a parameter into name, direction and type. Oracle
+// writes the direction between them and leaves it out for the common IN case,
+// so the returned slice always has all three, with an empty direction when none
+// was written.
+func oracleParamFields(param string) []string {
+	fields := strings.Fields(strings.TrimSpace(param))
+	if len(fields) < 2 {
+		return nil
+	}
+
+	name, rest := fields[0], fields[1:]
+
+	direction := ""
+	switch {
+	case len(rest) >= 2 && strings.EqualFold(rest[0], "IN") && strings.EqualFold(rest[1], "OUT"):
+		direction, rest = "IN OUT", rest[2:]
+	case strings.EqualFold(rest[0], "IN"), strings.EqualFold(rest[0], "OUT"):
+		direction, rest = strings.ToUpper(rest[0]), rest[1:]
+	}
+	if len(rest) == 0 {
+		return nil
+	}
+
+	return []string{name, direction, strings.Join(rest, " ")}
+}
+
+// oracleParams renders a parameter list the way Oracle writes one, with the
+// direction after the name rather than before it.
+func oracleParams(params []sqlmapper.Parameter) string {
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		part := p.Name
+		if p.Direction != "" {
+			part += " " + p.Direction
+		}
+		parts = append(parts, part+" "+p.DataType)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// oracleRoutineBody puts the IS a PL/SQL block needs in front of it. Without it
+// the server sees a function header running straight into BEGIN and rejects the
+// statement.
+func oracleRoutineBody(body string) string {
+	b := strings.TrimSpace(body)
+	upper := strings.ToUpper(b)
+	if strings.HasPrefix(upper, "IS") || strings.HasPrefix(upper, "AS") {
+		return b
+	}
+	return "IS\n" + b
 }

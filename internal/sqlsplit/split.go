@@ -54,6 +54,8 @@ var routineStart = regexp.MustCompile(`(?is)^\s*(?:CREATE` +
 	// SQL SECURITY too. Without them a dumped trigger did not look like a
 	// routine at all, and its body was cut at the first inner semicolon.
 	`(?:\s+DEFINER\s*=\s*\S+)?(?:\s+ALGORITHM\s*=\s*\S+)?(?:\s+SQL\s+SECURITY\s+\w+)?` +
+	// DBMS_METADATA writes EDITIONABLE between REPLACE and the object keyword.
+	`(?:\s+(?:NON)?EDITIONABLE)?` +
 	`\s+(?:FUNCTION|PROCEDURE|PROC|TRIGGER|PACKAGE|TYPE\s+BODY)|DECLARE|BEGIN)\b`)
 
 // delimiterDirective matches MySQL's DELIMITER, which changes the terminator

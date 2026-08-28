@@ -212,6 +212,15 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 				return nil, fmt.Errorf("error parsing CREATE TRIGGER: %v", err)
 			}
 			s.schema.Triggers = append(s.schema.Triggers, trigger)
+
+		// Functions and procedures were read by the stream parser only, so a
+		// script converted through this path lost them without a word.
+		case bytes.HasPrefix(upperStmt, []byte("CREATE FUNCTION")),
+			bytes.HasPrefix(upperStmt, []byte("CREATE PROCEDURE")),
+			bytes.HasPrefix(upperStmt, []byte("CREATE PROC ")):
+			if err := s.parseFunctions(string(stmt)); err != nil {
+				return nil, fmt.Errorf("error parsing routine: %v", err)
+			}
 		}
 	}
 
@@ -1054,8 +1063,10 @@ func (s *SQLServer) parseCreateTrigger(stmt []byte) (sqlmapper.Trigger, error) {
 		return trigger, fmt.Errorf("invalid CREATE TRIGGER statement")
 	}
 
-	triggerName := string(bytes.Trim(parts[2], "[]"))
-	trigger.Name = triggerName
+	// The name may be schema-qualified and bracketed, [dbo].[bump]. Trimming
+	// the outer brackets alone left the qualifier and one bracket behind, so the
+	// trigger came out named dbo].[bump.
+	trigger.Name = splitBracketedName(string(parts[2]))
 
 	upperStmt := bytes.ToUpper(stmt)
 
@@ -1213,16 +1224,23 @@ func (s *SQLServer) parseViews(statement string) error {
 	return nil
 }
 
-func (s *SQLServer) parseFunctions(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+(FUNCTION|PROCEDURE)\s+([.\w\[\]]+)\s*\((.*?)\)(?:\s+RETURNS\s+(\w+(?:\s*\([^)]*\))?))?\s+AS\s+BEGIN\s+(.*?)\s+END`)
-	matches := re.FindStringSubmatch(statement)
+// mssRoutineRe reads a CREATE FUNCTION or CREATE PROCEDURE. The parameter list
+// is optional, because a procedure that takes none is written without one, and
+// the body runs to the end of the batch.
+var mssRoutineRe = regexp.MustCompile(`(?is)CREATE\s+(FUNCTION|PROCEDURE|PROC)\s+([.\w\[\]]+)\s*(?:\((.*?)\))?\s*(?:RETURNS\s+(\w+(?:\s*\([^)]*\))?))?\s+AS\s+(.*)$`)
 
-	if len(matches) > 4 {
-		isProc := matches[1] == "PROCEDURE"
+func (s *SQLServer) parseFunctions(statement string) error {
+	matches := mssRoutineRe.FindStringSubmatch(statement)
+
+	if len(matches) > 5 {
+		isProc := !strings.EqualFold(matches[1], "FUNCTION")
 		functionName := matches[2]
 		function := sqlmapper.Function{
 			IsProc: isProc,
-			Body:   matches[5],
+			// Everything after AS is the body, BEGIN and END included. Matching
+			// what sat between them dropped the keywords, and a body without
+			// them runs only its first statement.
+			Body: strings.TrimSpace(matches[5]),
 		}
 
 		if !isProc && matches[4] != "" {
@@ -1232,10 +1250,10 @@ func (s *SQLServer) parseFunctions(statement string) error {
 		// Parse schema if exists
 		parts := strings.Split(strings.Trim(functionName, "[]"), ".")
 		if len(parts) > 1 {
-			function.Schema = parts[0]
-			function.Name = parts[1]
+			function.Schema = unbracketIdent(parts[0])
+			function.Name = unbracketIdent(parts[1])
 		} else {
-			function.Name = functionName
+			function.Name = unbracketIdent(functionName)
 		}
 
 		// Parse parameters

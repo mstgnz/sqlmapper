@@ -295,3 +295,70 @@ func TestSQLServerGenerateFromForeignSchema(t *testing.T) {
 	assert.Contains(t, out[:viewIdx], "GO")
 	assert.NotContains(t, out, "public.", "another dialect's default schema does not resolve here")
 }
+
+// realRoutineScript is the shape SSMS scripts a trigger and a function in:
+// bracketed, schema-qualified names and GO between batches.
+const realRoutineScript = `CREATE TABLE [dbo].[users](
+    [id] [int] IDENTITY(1,1) NOT NULL,
+    [n] [int] NULL,
+ CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED ([id] ASC)
+)
+GO
+CREATE TRIGGER [dbo].[bump] ON [dbo].[users] AFTER INSERT AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE u SET n = ISNULL(u.n, 0) + 2 FROM [dbo].[users] u JOIN inserted i ON i.id = u.id;
+END
+GO
+CREATE FUNCTION [dbo].[add_one](@v INT) RETURNS INT AS
+BEGIN
+    RETURN @v + 1;
+END
+GO
+`
+
+// Trimming the outer brackets off [dbo].[bump] left the qualifier and one
+// bracket behind, so the trigger came out named dbo].[bump. Functions and
+// procedures reached the stream parser only, so this path lost them entirely.
+func TestSQLServer_RealScriptRoutines(t *testing.T) {
+	schema, err := NewSQLServer().Parse(realRoutineScript)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Triggers, 1)
+	trigger := schema.Triggers[0]
+	assert.Equal(t, "bump", trigger.Name)
+	assert.Equal(t, "users", trigger.Table)
+	assert.Equal(t, "AFTER", trigger.Timing)
+	assert.Equal(t, "INSERT", trigger.Event)
+	assert.Contains(t, trigger.Body, "ISNULL(u.n, 0) + 2")
+
+	assert.Len(t, schema.Functions, 1)
+	fn := schema.Functions[0]
+	assert.Equal(t, "add_one", fn.Name)
+	assert.Equal(t, "dbo", fn.Schema)
+	assert.Equal(t, "INT", fn.Returns)
+	assert.Contains(t, fn.Body, "BEGIN", "the block keywords belong to the body")
+	assert.Contains(t, fn.Body, "RETURN @v + 1")
+
+	assert.Len(t, fn.Parameters, 1)
+	assert.Equal(t, "v", fn.Parameters[0].Name)
+	assert.Equal(t, "INT", fn.Parameters[0].DataType)
+}
+
+func TestSQLServer_RealScriptRoutineRoundTrip(t *testing.T) {
+	schema, err := NewSQLServer().Parse(realRoutineScript)
+	assert.NoError(t, err)
+
+	out, err := NewSQLServer().Generate(schema)
+	assert.NoError(t, err)
+
+	assert.Contains(t, out, "CREATE FUNCTION add_one(@v INT)")
+	assert.Contains(t, out, "RETURNS INT")
+	assert.Contains(t, out, "CREATE TRIGGER bump ON users")
+	assert.Contains(t, out, "AFTER INSERT")
+	// The body is the author's own SQL and is carried across as written; only
+	// the names this parser reads are unbracketed.
+	assert.NotContains(t, out, "CREATE TRIGGER dbo].[",
+		"a bracketed name is not trimmed by its outer characters")
+	assert.NotContains(t, out, "CREATE FUNCTION [")
+}
