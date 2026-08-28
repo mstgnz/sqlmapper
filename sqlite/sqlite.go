@@ -943,43 +943,13 @@ func (s *SQLite) generateViewSQL(view sqlmapper.View) string {
 // quoted here. Passing it through unquoted wrote DEFAULT active, which SQLite
 // reads as a column reference.
 func sqliteDefaultLiteral(value, columnType string) string {
-	dv := strings.TrimSpace(value)
-	if dv == "" || strings.EqualFold(dv, "NULL") {
-		return ""
-	}
-	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
-		return "CURRENT_TIMESTAMP"
-	}
-
 	// SQLite has no boolean and stores 0 and 1, so a boolean default belongs on
-	// an INTEGER column as a number. Quoting it wrote the string 'true'.
-	if strings.HasPrefix(columnType, "INTEGER") {
-		switch strings.ToLower(dv) {
-		case "true", "t", "yes":
-			return "1"
-		case "false", "f", "no":
-			return "0"
-		}
-	}
-	if isSQLiteNumeric(dv) {
-		return dv
-	}
-	if strings.ContainsAny(dv, "()") {
-		return expr.Value(dv, expr.SQLite)
-	}
-	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
-}
+	// an INTEGER or NUMERIC column as a number.
+	numeric := strings.HasPrefix(columnType, "INTEGER") ||
+		strings.HasPrefix(columnType, "NUMERIC") ||
+		strings.HasPrefix(columnType, "REAL")
 
-func isSQLiteNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != '-' && c != '+' {
-			return false
-		}
-	}
-	return true
+	return expr.DefaultLiteral(value, expr.SQLite, expr.DefaultOptions{NumericColumn: numeric})
 }
 
 // sqliteColumnCheckRe captures the body of a CHECK written on a column.

@@ -276,3 +276,50 @@ func TestConditionAndValueDifferOnBareBoolean(t *testing.T) {
 	assert.Equal(t, "is_active <> 0", Condition("is_active", Oracle))
 	assert.Equal(t, "is_active", Value("is_active", Oracle))
 }
+
+func TestDefaultLiteral(t *testing.T) {
+	tests := []struct {
+		value   string
+		to      Dialect
+		numeric bool
+		want    string
+	}{
+		// Nothing to write.
+		{"", PostgreSQL, false, ""},
+		{"NULL", PostgreSQL, false, ""},
+		{"null", MySQL, false, ""},
+
+		// Numbers pass through.
+		{"5", MySQL, true, "5"},
+		{"-1", MySQL, true, "-1"},
+		{"0.00", Oracle, true, "0.00"},
+
+		// A string is quoted, and a quote inside it is doubled. Five copies of
+		// this disagreed and one of them wrote 'it's'.
+		{"active", PostgreSQL, false, "'active'"},
+		{"it's", PostgreSQL, false, "'it''s'"},
+		{"it's", MySQL, false, "'it''s'"},
+		{"two words", SQLite, false, "'two words'"},
+
+		// A boolean lands on whatever the target made of the column.
+		{"true", PostgreSQL, false, "true"},
+		{"false", PostgreSQL, false, "false"},
+		{"true", PostgreSQL, true, "1"},
+		{"true", Oracle, false, "1"},
+		{"false", SQLServer, false, "0"},
+		{"true", SQLite, true, "1"},
+
+		// The current timestamp is spelled per dialect.
+		{"CURRENT_TIMESTAMP", PostgreSQL, false, "CURRENT_TIMESTAMP"},
+		{"CURRENT_TIMESTAMP", Oracle, false, "SYSTIMESTAMP"},
+		{"now()", Oracle, false, "SYSTIMESTAMP"},
+	}
+
+	for _, tt := range tests {
+		got := DefaultLiteral(tt.value, tt.to, DefaultOptions{NumericColumn: tt.numeric})
+		if got != tt.want {
+			t.Errorf("DefaultLiteral(%q, %v, numeric=%v) = %q, want %q",
+				tt.value, tt.to, tt.numeric, got, tt.want)
+		}
+	}
+}

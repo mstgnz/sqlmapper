@@ -334,3 +334,89 @@ func Normalize(sql string) string {
 	}
 	return SQL(e, Generic)
 }
+
+// DefaultOptions describes the column a default is being written onto.
+type DefaultOptions struct {
+	// NumericColumn says the target renders this column as a number, so a
+	// boolean word has to become 1 or 0. Every dialect but PostgreSQL turns a
+	// boolean into an integer somewhere, and each of them decided separately
+	// what to do about a default of "true": one wrote 1, one wrote true, and
+	// three wrote the string 'true' onto an integer column.
+	NumericColumn bool
+}
+
+// DefaultLiteral renders a column default for the target.
+//
+// The schema holds the value, not the literal that wrote it, so this is where
+// it becomes SQL again. It is shared because five copies of it disagreed: one
+// did not double the quote inside a value, so a default of it's came out as
+// 'it's' and would not load anywhere.
+//
+// It returns the empty string when there is nothing to write, which is both the
+// unset case and an explicit NULL: a column with no default and a column
+// defaulting to NULL are the same column.
+func DefaultLiteral(value string, to Dialect, opts DefaultOptions) string {
+	dv := strings.TrimSpace(value)
+	if dv == "" || strings.EqualFold(dv, "NULL") {
+		return ""
+	}
+
+	// A boolean word lands on whatever the target made of the column.
+	switch strings.ToLower(strings.Trim(dv, "'")) {
+	case "true", "t", "yes":
+		if opts.NumericColumn {
+			return "1"
+		}
+		if to.hasBoolean() {
+			// Lower case, which is how pg_dump writes it.
+			return "true"
+		}
+		return "1"
+	case "false", "f", "no":
+		if opts.NumericColumn {
+			return "0"
+		}
+		if to.hasBoolean() {
+			return "false"
+		}
+		return "0"
+	}
+
+	if isNumericLiteral(dv) {
+		return dv
+	}
+
+	// The current timestamp, written as a bare word, has a spelling of its own
+	// in a DEFAULT clause. CURRENT_TIMESTAMP is standard and the three that
+	// accept it are written that way.
+	if nowAliases[strings.ToLower(dv)] {
+		return to.nowInDefault()
+	}
+
+	// A call or an expression goes through the parser, which knows each
+	// dialect's own functions.
+	if strings.ContainsAny(dv, "()") {
+		return Value(dv, to)
+	}
+
+	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
+}
+
+// isNumericLiteral reports whether s is a bare number.
+func isNumericLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	dot := false
+	for i, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c == '.' && !dot:
+			dot = true
+		case (c == '-' || c == '+') && i == 0:
+		default:
+			return false
+		}
+	}
+	return strings.ContainsAny(s, "0123456789")
+}

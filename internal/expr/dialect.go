@@ -112,3 +112,17 @@ var nowAliases = map[string]bool{
 	"sysdate":           true,
 	"current_date":      true,
 }
+
+// nowInDefault is how a dialect spells the current timestamp where a column
+// default is expected. Oracle and SQL Server have no CURRENT_TIMESTAMP to put
+// there; everywhere else it is the standard spelling and the one a reader
+// expects.
+func (d Dialect) nowInDefault() string {
+	switch d {
+	case Oracle:
+		return "SYSTIMESTAMP"
+	case SQLServer:
+		return "SYSUTCDATETIME()"
+	}
+	return "CURRENT_TIMESTAMP"
+}

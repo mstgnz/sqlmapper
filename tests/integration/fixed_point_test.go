@@ -173,3 +173,66 @@ func TestDefaultsAreStoredUnquoted(t *testing.T) {
 		})
 	}
 }
+
+// A default is written by one shared renderer. Five copies of it disagreed:
+// one did not double the quote inside a value, so a default of it's came out as
+// 'it's' and would not load; one wrote the string 'NULL' where the others wrote
+// no default at all; and three wrote the string 'true' onto an integer column.
+func TestDefaultsAgreeAcrossDialects(t *testing.T) {
+	dialects := map[string]func() sqlmapper.Database{
+		"mysql":     mysql.NewMySQL,
+		"postgres":  postgres.NewPostgreSQL,
+		"sqlite":    sqlite.NewSQLite,
+		"oracle":    oracle.NewOracle,
+		"sqlserver": sqlserver.NewSQLServer,
+	}
+
+	tests := []struct {
+		name     string
+		dataType string
+		value    string
+		want     string   // what every dialect writes
+		except   []string // dialects that write something else, and why
+	}{
+		{name: "a quote inside a value is doubled", dataType: "varchar", value: "it's", want: "DEFAULT 'it''s'"},
+		{name: "a string is quoted", dataType: "varchar", value: "active", want: "DEFAULT 'active'"},
+		{name: "two words stay one value", dataType: "varchar", value: "two words", want: "DEFAULT 'two words'"},
+		{name: "a number is not quoted", dataType: "int", value: "5", want: "DEFAULT 5"},
+		{name: "a boolean on an integer column is a number", dataType: "int", value: "true", want: "DEFAULT 1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := &sqlmapper.Schema{Tables: []sqlmapper.Table{{
+				Name: "t",
+				Columns: []sqlmapper.Column{{
+					Name: "c", DataType: tt.dataType, Length: 20,
+					DefaultValue: tt.value, IsNullable: true,
+				}},
+			}}}
+
+			for name, mk := range dialects {
+				out, err := mk().Generate(schema)
+				require.NoError(t, err)
+				assert.Contains(t, out, tt.want, "%s wrote something else", name)
+			}
+		})
+	}
+
+	// A default of NULL is the same as no default, everywhere.
+	t.Run("NULL is no default", func(t *testing.T) {
+		schema := &sqlmapper.Schema{Tables: []sqlmapper.Table{{
+			Name: "t",
+			Columns: []sqlmapper.Column{{
+				Name: "c", DataType: "varchar", Length: 20,
+				DefaultValue: "NULL", IsNullable: true,
+			}},
+		}}}
+
+		for name, mk := range dialects {
+			out, err := mk().Generate(schema)
+			require.NoError(t, err)
+			assert.NotContains(t, out, "DEFAULT", "%s wrote a default for NULL", name)
+		}
+	})
+}

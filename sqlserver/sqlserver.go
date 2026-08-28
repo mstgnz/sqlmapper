@@ -434,37 +434,25 @@ func (s *SQLServer) defaultLiteral(col sqlmapper.Column, mssType string) string 
 		return ""
 	}
 
-	if mssType == "BIT" {
-		switch strings.ToLower(strings.Trim(dv, "'")) {
-		case "true", "t", "yes", "1":
-			return "1"
-		case "false", "f", "no", "0":
-			return "0"
-		}
-	}
-	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
-		return "SYSUTCDATETIME()"
-	}
-	if isNumericLiteral(dv) {
-		return dv
-	}
-	if strings.ContainsAny(dv, "()") {
-		return expr.Value(dv, expr.SQLServer)
-	}
-	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
+	return expr.DefaultLiteral(dv, expr.SQLServer, expr.DefaultOptions{
+		NumericColumn: mssIsNumericType(mssType),
+	})
 }
 
-// isNumericLiteral reports whether s looks like a bare number.
-func isNumericLiteral(s string) bool {
-	if s == "" {
-		return false
+// mssIsNumericType reports whether a rendered type holds a number, which
+// decides what a boolean default becomes. SQL Server has no boolean, so BIT is
+// one of them.
+func mssIsNumericType(rendered string) bool {
+	name := rendered
+	if i := strings.IndexByte(name, '('); i != -1 {
+		name = name[:i]
 	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != '-' {
-			return false
-		}
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "BIT", "TINYINT", "SMALLINT", "INT", "BIGINT",
+		"DECIMAL", "NUMERIC", "FLOAT", "REAL", "MONEY", "SMALLMONEY":
+		return true
 	}
-	return true
+	return false
 }
 
 // generateConstraintSQL renders a table constraint.

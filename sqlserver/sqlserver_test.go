@@ -241,15 +241,6 @@ func TestNormalizeSQLServerTypeName(t *testing.T) {
 	}
 }
 
-func TestIsNumericLiteral(t *testing.T) {
-	for _, s := range []string{"0", "42", "-1", "3.14"} {
-		assert.True(t, isNumericLiteral(s), "%q should be numeric", s)
-	}
-	for _, s := range []string{"", "abc", "1a", "N'x'"} {
-		assert.False(t, isNumericLiteral(s), "%q should not be numeric", s)
-	}
-}
-
 func TestColumnIsAutoIncrement(t *testing.T) {
 	table := sqlmapper.Table{Columns: []sqlmapper.Column{
 		{Name: "id", AutoIncrement: true},

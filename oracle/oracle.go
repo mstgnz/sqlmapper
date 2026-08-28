@@ -1030,8 +1030,12 @@ func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey bool) s
 	oracleType := o.resolveTypeForKey(col, isKey)
 	sql := col.Name + " " + oracleType
 
-	if col.DefaultValue != "" && !col.AutoIncrement {
-		sql += " DEFAULT " + o.defaultLiteral(col, oracleType)
+	// The literal decides, not the value: a default of NULL renders as nothing,
+	// and appending the keyword anyway wrote "DEFAULT" with no value after it.
+	if !col.AutoIncrement {
+		if lit := o.defaultLiteral(col, oracleType); lit != "" {
+			sql += " DEFAULT " + lit
+		}
 	}
 
 	// Oracle wants the identity clause after the type and before the
@@ -1067,35 +1071,17 @@ func (o *Oracle) defaultLiteral(col sqlmapper.Column, oracleType string) string 
 		}
 	}
 
-	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
-		// A character column cannot be assigned a timestamp: Oracle answers
-		// ORA-00932. SQLite stores the current time as text and means exactly
-		// this conversion, so it is written out rather than dropped.
-		if oracleIsCharacterType(oracleType) {
-			return "TO_CHAR(SYSTIMESTAMP)"
-		}
-		return "SYSTIMESTAMP"
+	// A character column cannot be assigned a timestamp: Oracle answers
+	// ORA-00932. SQLite stores the current time as text and means exactly this
+	// conversion, so it is written out rather than dropped.
+	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") && oracleIsCharacterType(oracleType) {
+		return "TO_CHAR(SYSTIMESTAMP)"
 	}
-	if isNumericLiteral(dv) {
-		return dv
-	}
-	if strings.ContainsAny(dv, "()") {
-		return expr.Value(dv, expr.Oracle)
-	}
-	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
-}
 
-// isNumericLiteral reports whether s looks like a bare number.
-func isNumericLiteral(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return expr.DefaultLiteral(dv, expr.Oracle, expr.DefaultOptions{
+		NumericColumn: strings.HasPrefix(strings.ToUpper(oracleType), "NUMBER") ||
+			strings.HasPrefix(strings.ToUpper(oracleType), "BINARY_"),
+	})
 }
 
 // generateConstraintSQL renders a table constraint.

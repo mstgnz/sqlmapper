@@ -1021,16 +1021,24 @@ func (m *MySQL) defaultLiteral(column sqlmapper.Column, mysqlType string) string
 		}
 	}
 
-	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
-		return "CURRENT_TIMESTAMP"
+	return expr.DefaultLiteral(dv, expr.MySQL, expr.DefaultOptions{
+		NumericColumn: mysqlIsNumericType(mysqlType),
+	})
+}
+
+// mysqlIsNumericType reports whether a rendered type holds a number, which
+// decides what a boolean default becomes.
+func mysqlIsNumericType(rendered string) bool {
+	name := rendered
+	if i := strings.IndexByte(name, '('); i != -1 {
+		name = name[:i]
 	}
-	if isNumeric(dv) {
-		return dv
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+		"decimal", "numeric", "float", "double", "real", "bit":
+		return true
 	}
-	if strings.ContainsAny(dv, "()") {
-		return expr.Value(dv, expr.MySQL)
-	}
-	return fmt.Sprintf("'%s'", strings.ReplaceAll(dv, "'", "''"))
+	return false
 }
 
 // resolveType maps a column's DataType to the MySQL equivalent.
@@ -1190,19 +1198,6 @@ func splitAndTrim(s string) []string {
 		parts[i] = strings.TrimSpace(parts[i])
 	}
 	return parts
-}
-
-// isNumeric reports whether s looks like a bare number (not needing quotes).
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 // atoi reads a base-10 integer out of a string that a pattern has already

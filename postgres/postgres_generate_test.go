@@ -294,13 +294,6 @@ func TestColumnIsAutoIncrement(t *testing.T) {
 	assert.False(t, columnIsAutoIncrement(table, "missing"))
 }
 
-func TestIsNumeric(t *testing.T) {
-	assert.True(t, isNumeric("0"))
-	assert.True(t, isNumeric("-1.5"))
-	assert.False(t, isNumeric(""))
-	assert.False(t, isNumeric("abc"))
-}
-
 func TestStripSchemaPrefix(t *testing.T) {
 	assert.Equal(t, "users", stripSchemaPrefix("public.users"))
 	assert.Equal(t, "users", stripSchemaPrefix("users"))

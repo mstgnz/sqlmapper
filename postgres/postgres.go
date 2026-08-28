@@ -1333,14 +1333,13 @@ func (p *PostgreSQL) generateColumnSQL(col sqlmapper.Column, tableName string, i
 				dv = "false"
 			}
 		}
-		if strings.ContainsAny(dv, "()") {
-			parts = append(parts, "DEFAULT", expr.Value(dv, expr.PostgreSQL))
-		} else if strings.ToUpper(dv) == "CURRENT_TIMESTAMP" || dv == "true" || dv == "false" {
-			parts = append(parts, "DEFAULT", dv)
-		} else if isNumeric(dv) {
-			parts = append(parts, "DEFAULT", dv)
-		} else {
-			parts = append(parts, "DEFAULT", fmt.Sprintf("'%s'", dv))
+		// Shared with the other four. The copy that used to live here did not
+		// double the quote inside a value, so a default of it's came out as
+		// 'it's' and would not load.
+		if lit := expr.DefaultLiteral(dv, expr.PostgreSQL, expr.DefaultOptions{
+			NumericColumn: pgIsNumericType(pgType),
+		}); lit != "" {
+			parts = append(parts, "DEFAULT", lit)
 		}
 	}
 
@@ -1543,19 +1542,6 @@ func splitAndTrim(s string) []string {
 	return parts
 }
 
-// isNumeric reports whether s looks like a bare number.
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
-}
-
 // atoi reads a base-10 integer out of a string that a pattern has already
 // matched as digits. Nothing malformed can reach here, and zero is the right
 // answer if anything ever does.
@@ -1692,4 +1678,20 @@ func pgComments(content string) (tables map[string]string, columns map[string]ma
 		}
 	}
 	return tables, columns
+}
+
+// pgIsNumericType reports whether a rendered type holds a number, which decides
+// what a boolean default becomes. PostgreSQL has a real boolean, so a boolean
+// column is not one of these and keeps TRUE and FALSE.
+func pgIsNumericType(rendered string) bool {
+	name := rendered
+	if i := strings.IndexByte(name, '('); i != -1 {
+		name = name[:i]
+	}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "smallint", "integer", "int", "bigint", "serial", "bigserial", "smallserial",
+		"decimal", "numeric", "real", "double precision":
+		return true
+	}
+	return false
 }
