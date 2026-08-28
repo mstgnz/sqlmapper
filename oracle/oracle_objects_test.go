@@ -236,7 +236,10 @@ func TestOracleParseColumnAttributes(t *testing.T) {
 	assert.Equal(t, 12, byName["balance"].Length)
 	assert.Equal(t, 2, byName["balance"].Scale)
 	assert.Equal(t, "0", byName["balance"].DefaultValue)
-	assert.Equal(t, "'none'", byName["label"].DefaultValue)
+	// The schema holds the value, not the literal: every generator quotes it
+	// again for its own dialect, and keeping the quotes here corrupted the
+	// default in every conversion.
+	assert.Equal(t, "none", byName["label"].DefaultValue)
 	// Oracle type names are folded onto the shared vocabulary so the other
 	// dialects' type maps can pick them up; CLOB becomes text.
 	assert.Equal(t, "text", byName["note"].DataType)

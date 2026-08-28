@@ -220,6 +220,14 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// its parent and the foreign key would fail to resolve.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
+	// Types the source declared come first, because a column may be one. The
+	// file generator used to emit none of them, so a schema it had just parsed
+	// came back out with tables referring to a type nothing had created.
+	for _, typ := range schema.Types {
+		result.WriteString(sqlfmt.Terminate(p.generateTypeSQL(typ), ";"))
+		result.WriteString("\n")
+	}
+
 	for _, stmt := range p.enumTypesSQL(tables) {
 		result.WriteString(stmt)
 		result.WriteString("\n")

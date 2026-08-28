@@ -220,10 +220,12 @@ END;`
 
 func TestSQLiteDefaultValue(t *testing.T) {
 	tests := map[string]string{
-		"n INTEGER DEFAULT 1":                       "1",
-		"n INTEGER NOT NULL DEFAULT 0":              "0",
-		"s TEXT DEFAULT 'draft'":                    "'draft'",
-		"s TEXT DEFAULT 'two words'":                "'two words'",
+		"n INTEGER DEFAULT 1":          "1",
+		"n INTEGER NOT NULL DEFAULT 0": "0",
+		// The schema holds the value, not the literal: the generator quotes
+		// it again for whichever dialect it is writing.
+		"s TEXT DEFAULT 'draft'":                    "draft",
+		"s TEXT DEFAULT 'two words'":                "two words",
 		"t TEXT DEFAULT CURRENT_TIMESTAMP":          "CURRENT_TIMESTAMP",
 		"t TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL": "CURRENT_TIMESTAMP",
 		"t TEXT DEFAULT (datetime('now'))":          "(datetime('now'))",

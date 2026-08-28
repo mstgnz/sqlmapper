@@ -113,3 +113,23 @@ func TestUnsupportedRoutine(t *testing.T) {
 		}
 	}
 }
+
+func TestUnquoteLiteral(t *testing.T) {
+	tests := map[string]string{
+		"'active'":      "active",
+		"'two words'":   "two words",
+		"'it''s'":       "it's",
+		"''":            "",
+		"active":        "active",
+		"5":             "5",
+		"'unterminated": "'unterminated",
+		"  'padded'  ":  "padded",
+		"'":             "'",
+	}
+
+	for in, want := range tests {
+		if got := UnquoteLiteral(in); got != want {
+			t.Errorf("UnquoteLiteral(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

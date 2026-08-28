@@ -815,7 +815,10 @@ func (s *SQLServer) parseConstraint(def []byte) sqlmapper.Constraint {
 			startIdx := bytes.Index(refPart, []byte("("))
 			endIdx := bytes.Index(refPart, []byte(")"))
 			if startIdx != -1 && endIdx != -1 {
-				tableName := bytes.TrimSpace(refPart[9:startIdx])
+				// REFERENCES is ten characters. Slicing from nine left its
+				// final S on the front of the table name, so the generator
+				// wrote REFERENCES S customers.
+				tableName := bytes.TrimSpace(refPart[len("REFERENCES"):startIdx])
 				// Remove schema prefix and brackets
 				if idx := bytes.LastIndex(tableName, []byte(".")); idx != -1 {
 					tableName = tableName[idx+1:]

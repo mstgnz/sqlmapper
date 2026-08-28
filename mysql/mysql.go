@@ -119,9 +119,12 @@ var (
 	mysqlTypeWithLenRe  = regexp.MustCompile(`^(\w+)\s*\((\d+)(?:\s*,\s*(\d+))?\)$`)
 	mysqlCheckRe        = regexp.MustCompile(`(?i)CHECK\s*\((.*)\)`)
 	mysqlConstraintRe   = regexp.MustCompile(`(?i)CONSTRAINT\s+` + "`?" + `(\w+)` + "`?" + `\s+(.*)`)
-	mysqlPKRe           = regexp.MustCompile(`(?i)PRIMARY\s+KEY\s*\(([^)]+)\)`)
-	mysqlFKRe           = regexp.MustCompile(`(?i)FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\(([^)]+)\)`)
-	mysqlUniqueRe       = regexp.MustCompile(`(?i)UNIQUE\s*(?:KEY\s+(\w+)\s*)?\(([^)]+)\)`)
+	// A key column may carry a prefix length, PRIMARY KEY (email(255)), so the
+	// list has to tolerate one level of nesting. Stopping at the first closing
+	// parenthesis captured "email(255" and wrote a list that never closed.
+	mysqlPKRe     = regexp.MustCompile(`(?i)PRIMARY\s+KEY\s*\(((?:[^()]|\([^)]*\))+)\)`)
+	mysqlFKRe     = regexp.MustCompile(`(?i)FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+` + "`?" + `([\w.]+)` + "`?" + `\s*\(([^)]+)\)`)
+	mysqlUniqueRe = regexp.MustCompile(`(?i)UNIQUE\s*(?:KEY\s+(\w+)\s*)?\(((?:[^()]|\([^)]*\))+)\)`)
 )
 
 // mysqlDefaultStopWords marks the tokens that end a DEFAULT clause. NULL is
@@ -634,15 +637,15 @@ func (m *MySQL) parseConstraint(def string) (sqlmapper.Constraint, error) {
 	case strings.Contains(defUpper, "PRIMARY KEY"):
 		constraint.Type = "PRIMARY KEY"
 		if m := mysqlPKRe.FindStringSubmatch(def); len(m) > 1 {
-			constraint.Columns = splitAndTrim(m[1])
+			constraint.Columns = splitKeyColumns(m[1])
 		}
 
 	case strings.Contains(defUpper, "FOREIGN KEY"):
 		constraint.Type = "FOREIGN KEY"
 		if m := mysqlFKRe.FindStringSubmatch(def); len(m) > 3 {
-			constraint.Columns = splitAndTrim(m[1])
+			constraint.Columns = splitKeyColumns(m[1])
 			constraint.RefTable = stripSchemaPrefix(m[2])
-			constraint.RefColumns = splitAndTrim(m[3])
+			constraint.RefColumns = splitKeyColumns(m[3])
 		}
 		if strings.Contains(defUpper, "ON DELETE") {
 			switch {
@@ -679,7 +682,7 @@ func (m *MySQL) parseConstraint(def string) (sqlmapper.Constraint, error) {
 			if constraint.Name == "" && m[1] != "" {
 				constraint.Name = m[1]
 			}
-			constraint.Columns = splitAndTrim(m[2])
+			constraint.Columns = splitKeyColumns(m[2])
 		}
 
 	case strings.Contains(defUpper, "CHECK"):
@@ -1250,4 +1253,21 @@ func (m *MySQL) generateRoutinesSQL(schema *sqlmapper.Schema) string {
 	sb.WriteString("DELIMITER ;\n\n")
 
 	return sb.String()
+}
+
+// splitKeyColumns splits a key's column list and drops the prefix length MySQL
+// allows on one, "email(255)".
+//
+// The length says how much of the column the index covers, which is a MySQL
+// index detail rather than part of the schema: carrying it into the column name
+// wrote UNIQUE (email(255)) into targets that have no such syntax. The
+// generator puts it back where it is needed.
+func splitKeyColumns(list string) []string {
+	parts := splitAndTrim(list)
+	for i, p := range parts {
+		if open := strings.IndexByte(p, '('); open > 0 && strings.HasSuffix(p, ")") {
+			parts[i] = strings.TrimSpace(p[:open])
+		}
+	}
+	return parts
 }

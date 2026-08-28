@@ -257,8 +257,12 @@ func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
 	}
 
 	column.DefaultValue = sqliteDefaultValue(def)
-	if m := sqliteCheckRe.FindStringSubmatch(strings.TrimSpace(string(def))); m != nil {
-		column.CheckExpression = strings.TrimSpace(m[1])
+
+	// A column may carry its own CHECK, "meta TEXT CHECK (json_valid(meta))".
+	// Matching only a definition that is nothing but a CHECK meant a column
+	// constraint was read as no constraint at all.
+	if m := sqliteColumnCheckRe.FindSubmatch(def); m != nil {
+		column.CheckExpression = strings.TrimSpace(string(m[1]))
 	}
 
 	return column, true
@@ -282,10 +286,13 @@ func sqliteDefaultValue(def []byte) string {
 	}
 
 	if rest[0] == '\'' {
+		// The schema holds the value, not the literal: every generator
+		// quotes it again for its own dialect, and keeping the quotes here
+		// corrupted the default in every cross-dialect conversion.
 		if end := strings.IndexByte(rest[1:], '\''); end != -1 {
-			return rest[:end+2]
+			return sqlfmt.UnquoteLiteral(rest[:end+2])
 		}
-		return rest
+		return sqlfmt.UnquoteLiteral(rest)
 	}
 	if rest[0] == '(' {
 		depth := 0
@@ -559,8 +566,8 @@ func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Co
 		if col.IsUnique {
 			def.WriteString(" UNIQUE")
 		}
-		if col.DefaultValue != "" {
-			def.WriteString(" DEFAULT " + expr.Value(col.DefaultValue, expr.SQLite))
+		if lit := sqliteDefaultLiteral(col.DefaultValue, sqliteColumnType(col)); lit != "" {
+			def.WriteString(" DEFAULT " + lit)
 		}
 		if col.CheckExpression != "" {
 			def.WriteString(" CHECK (" + expr.Condition(col.CheckExpression, expr.SQLite) + ")")
@@ -926,3 +933,51 @@ func (s *SQLite) generateViewSQL(view sqlmapper.View) string {
 	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLite)
 	return fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, body)
 }
+
+// sqliteDefaultLiteral renders a column default as SQLite spells it.
+//
+// The schema holds the value rather than the literal, so a string has to be
+// quoted here. Passing it through unquoted wrote DEFAULT active, which SQLite
+// reads as a column reference.
+func sqliteDefaultLiteral(value, columnType string) string {
+	dv := strings.TrimSpace(value)
+	if dv == "" || strings.EqualFold(dv, "NULL") {
+		return ""
+	}
+	if strings.EqualFold(dv, "CURRENT_TIMESTAMP") {
+		return "CURRENT_TIMESTAMP"
+	}
+
+	// SQLite has no boolean and stores 0 and 1, so a boolean default belongs on
+	// an INTEGER column as a number. Quoting it wrote the string 'true'.
+	if strings.HasPrefix(columnType, "INTEGER") {
+		switch strings.ToLower(dv) {
+		case "true", "t", "yes":
+			return "1"
+		case "false", "f", "no":
+			return "0"
+		}
+	}
+	if isSQLiteNumeric(dv) {
+		return dv
+	}
+	if strings.ContainsAny(dv, "()") {
+		return expr.Value(dv, expr.SQLite)
+	}
+	return "'" + strings.ReplaceAll(dv, "'", "''") + "'"
+}
+
+func isSQLiteNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' && c != '-' && c != '+' {
+			return false
+		}
+	}
+	return true
+}
+
+// sqliteColumnCheckRe captures the body of a CHECK written on a column.
+var sqliteColumnCheckRe = regexp.MustCompile(`(?is)\bCHECK\s*\(((?:[^()]|\([^()]*\))*)\)`)

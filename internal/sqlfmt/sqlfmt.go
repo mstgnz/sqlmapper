@@ -120,3 +120,18 @@ func firstWord(s string) string {
 	}
 	return s
 }
+
+// UnquoteLiteral strips the quotes from a SQL string literal and undoes the
+// doubling that escapes a quote inside one.
+//
+// Parsers have to agree about this: the schema holds the value, not the
+// literal, and every generator quotes it again for its own dialect. Two of them
+// kept the quotes, so a default of 'active' reached PostgreSQL as a pair of
+// empty strings around a bare word, and Oracle as a value wrapped twice more.
+func UnquoteLiteral(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 || v[0] != '\'' || v[len(v)-1] != '\'' {
+		return v
+	}
+	return strings.ReplaceAll(v[1:len(v)-1], "''", "'")
+}

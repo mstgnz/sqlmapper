@@ -279,6 +279,13 @@ fidelity for a schema that actually loads:
   verbatim, so a real boolean target fails with
   `operator does not exist: boolean = integer`.
 
+Both choices are safe rather than reversible, and that shows if a converted
+schema is converted again: a type with no faithful equivalent widens each time.
+Oracle `NUMBER(5)` holds five digits, more than a `smallint`, so it becomes an
+int and returns as `NUMBER(10)`; SQL Server `BIT` has no boolean to return to
+and comes back as `SMALLINT`. Everything else lands on a fixed point, which
+`tests/integration/fixed_point_test.go` checks for every pair.
+
 ## Documentation
 
 | Page                                                                                                                                                        | What is in it                                           |

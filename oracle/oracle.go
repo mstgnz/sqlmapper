@@ -478,11 +478,7 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 			// after DEFAULT is a space, so searching the untrimmed remainder
 			// found index 0 and every default came out empty.
 			restStr := strings.TrimSpace(colDef[defaultIdx+len("DEFAULT"):])
-			defaultEnd := strings.Index(restStr, " ")
-			if defaultEnd == -1 {
-				defaultEnd = len(restStr)
-			}
-			col.DefaultValue = strings.TrimSpace(restStr[:defaultEnd])
+			col.DefaultValue = oracleDefaultValue(restStr)
 
 			// SYSDATE and SYSTIMESTAMP are Oracle's now(); quoting them as a
 			// literal produced DEFAULT 'SYSTIMESTAMP', which no other dialect
@@ -576,6 +572,13 @@ func (o *Oracle) parseCreateSequence(stmt string) (sqlmapper.Sequence, error) {
 	upper := strings.ToUpper(stmt)
 	seq.Cycle = strings.Contains(upper, "CYCLE") && !strings.Contains(upper, "NOCYCLE") &&
 		!strings.Contains(upper, "NO CYCLE")
+
+	// NOCACHE is a cache of none, which is what a cache of one means in the
+	// schema. Without this the clause was dropped and a sequence written with
+	// it came back out caching by default.
+	if strings.Contains(upper, "NOCACHE") || strings.Contains(upper, "NO CACHE") {
+		seq.Cache = 1
+	}
 
 	return seq, nil
 }
@@ -1398,4 +1401,48 @@ func oracleRoutineBody(body string) string {
 func (o *Oracle) generateViewSQL(view sqlmapper.View) string {
 	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.Oracle)
 	return fmt.Sprintf("CREATE OR REPLACE VIEW %s AS\n%s", view.Name, body)
+}
+
+// oracleDefaultValue reads what follows DEFAULT: a quoted literal, a call with
+// its own parentheses, or a bare token.
+//
+// Reading up to the first space cut a literal in half at "two words", and
+// keeping the quotes on the value corrupted the default in every conversion,
+// because the schema holds the value and each generator quotes it again.
+func oracleDefaultValue(rest string) string {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return ""
+	}
+
+	if rest[0] == '\'' {
+		for i := 1; i < len(rest); i++ {
+			if rest[i] != '\'' {
+				continue
+			}
+			if i+1 < len(rest) && rest[i+1] == '\'' {
+				i++
+				continue
+			}
+			return sqlfmt.UnquoteLiteral(rest[:i+1])
+		}
+		return sqlfmt.UnquoteLiteral(rest)
+	}
+
+	if open := strings.IndexByte(rest, '('); open != -1 && open < strings.IndexByte(rest+" ", ' ') {
+		depth := 0
+		for i, c := range rest {
+			switch c {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					return rest[:i+1]
+				}
+			}
+		}
+	}
+
+	return strings.Fields(rest)[0]
 }
