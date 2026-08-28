@@ -42,91 +42,19 @@ func (p *MySQLStreamParser) ParseStream(reader io.Reader, callback func(stream.S
 		if statement == "" {
 			continue
 		}
-		dispatch := dispatchKey(statement)
 
-		// Parse CREATE TABLE statements
-		if keyword.HasPrefix(dispatch, "CREATE TABLE") {
-			table, err := p.parseTableStatement(statement)
-			if err != nil {
-				return err
-			}
-
-			err = callback(stream.SchemaObject{
-				Type: stream.TableObject,
-				Data: table,
-			})
-			if err != nil {
-				return err
-			}
+		// One dispatch, shared with ParseStreamParallel. There used to be two
+		// of them, an if chain here and the switch there, and they drifted:
+		// constraints reported by one were dropped by the other.
+		obj, err := p.parseStatement(statement)
+		if err != nil {
+			return err
+		}
+		if obj == nil {
 			continue
 		}
-
-		// Parse CREATE VIEW statements
-		if strings.HasPrefix(dispatch, "CREATE VIEW") {
-			view, err := p.parseViewStatement(statement)
-			if err != nil {
-				return err
-			}
-
-			err = callback(stream.SchemaObject{
-				Type: stream.ViewObject,
-				Data: view,
-			})
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Parse CREATE FUNCTION statements
-		if strings.HasPrefix(dispatch, "CREATE FUNCTION") {
-			function, err := p.parseFunctionStatement(statement)
-			if err != nil {
-				return err
-			}
-
-			err = callback(stream.SchemaObject{
-				Type: stream.FunctionObject,
-				Data: function,
-			})
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Parse CREATE PROCEDURE statements
-		if strings.HasPrefix(dispatch, "CREATE PROCEDURE") {
-			procedure, err := p.parseProcedureStatement(statement)
-			if err != nil {
-				return err
-			}
-
-			err = callback(stream.SchemaObject{
-				Type: stream.ProcedureObject,
-				Data: procedure,
-			})
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Parse CREATE TRIGGER statements
-		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
-			trigger, err := p.parseTriggerStatement(statement)
-			if err != nil {
-				return err
-			}
-
-			err = callback(stream.SchemaObject{
-				Type: stream.TriggerObject,
-				Data: trigger,
-			})
-			if err != nil {
-				return err
-			}
-			continue
+		if err := callback(*obj); err != nil {
+			return err
 		}
 	}
 

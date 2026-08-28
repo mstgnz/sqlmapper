@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mstgnz/sqlmapper"
@@ -167,6 +168,74 @@ GO
 CREATE VIEW [dbo].[active] AS SELECT id FROM dbo.users
 GO
 `
+
+// ParseStreamParallel is a third reader, and it has to see what ParseStream
+// sees. It did not: each stream parser had two dispatches, an if chain in
+// ParseStream and a switch in parseStatement, and the constraints one of them
+// reported were dropped by the other. Order is not preserved in parallel mode,
+// so the objects are compared as a set.
+func TestParseStreamAndParallelAgree(t *testing.T) {
+	tests := []struct {
+		name   string
+		dump   string
+		stream func() stream.StreamParser
+	}{
+		{"mysql", mysqlDump, func() stream.StreamParser { return mysql.NewMySQLStreamParser() }},
+		{"postgres", postgresDump, func() stream.StreamParser { return postgres.NewPostgreSQLStreamParser() }},
+		{"sqlite", sqliteDump, func() stream.StreamParser { return sqlite.NewSQLiteStreamParser() }},
+		{"oracle", oracleDump, func() stream.StreamParser { return oracle.NewOracleStreamParser() }},
+		{"sqlserver", sqlserverDump, func() stream.StreamParser { return sqlserver.NewSQLServerStreamParser() }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serial, err := collectObjects(func(cb func(stream.SchemaObject) error) error {
+				return tt.stream().ParseStream(strings.NewReader(tt.dump), cb)
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, serial)
+
+			parallel, err := collectObjects(func(cb func(stream.SchemaObject) error) error {
+				return tt.stream().ParseStreamParallel(strings.NewReader(tt.dump), cb, 4)
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, serial, parallel)
+		})
+	}
+}
+
+// collectObjects names every object a reader reports, sorted, because the
+// parallel reader does not preserve order.
+func collectObjects(run func(func(stream.SchemaObject) error) error) ([]string, error) {
+	var mu sync.Mutex
+	var out []string
+
+	err := run(func(obj stream.SchemaObject) error {
+		mu.Lock()
+		defer mu.Unlock()
+		switch v := obj.Data.(type) {
+		case *sqlmapper.Table:
+			out = append(out, "table "+v.Name)
+		case *sqlmapper.View:
+			out = append(out, "view "+v.Name)
+		case *sqlmapper.Index:
+			out = append(out, "index "+v.Name)
+		case *sqlmapper.Constraint:
+			out = append(out, "constraint "+constraintKey(*v))
+		case *sqlmapper.Function:
+			out = append(out, "function "+v.Name)
+		case *sqlmapper.Trigger:
+			out = append(out, "trigger "+v.Name)
+		default:
+			out = append(out, fmt.Sprintf("other %T", obj.Data))
+		}
+		return nil
+	})
+
+	sort.Strings(out)
+	return out, err
+}
 
 // The two ways to write a schema have to produce the same SQL. They did not:
 // the stream wrote a view body as it stood, so another dialect's schema
