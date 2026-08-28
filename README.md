@@ -236,6 +236,26 @@ dialect, loaded into a fresh database, and then fired by an `INSERT` and called
 directly to confirm they still run. Converted to a different dialect, the same
 routines come out commented and the file still loads.
 
+## What a real schema exercises
+
+The matrix above is a narrow schema, and a narrow schema hides things. The
+fixtures under `tests/integration/testdata/schemas` are a wide one: the same
+schema written five ways, each taken from the server's own dump tool after
+loading it. Between them they carry table and column comments, composite and
+self-referencing keys, every referential action, unique and partial and
+composite indexes, checks written both on the column and at the table, views,
+functions, procedures, triggers, sequences, an enum type, an array column, an
+extension and grants.
+
+All twenty-five conversions of those five load into a real server. Eleven of
+them did not when the fixtures were first written, and the fourteen defects
+behind that are what `tests/integration/full_schema_test.go` now holds a line
+against: it records how much of each feature every parser finds and fails if one
+of them starts finding less.
+
+Two things a dialect states are not read: SQL Server keeps comments in extended
+properties rather than in the DDL, and no dialect's partitioning is carried.
+
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and
 below, SQL Server 2016 and below, partitioned tables, generated columns, and
