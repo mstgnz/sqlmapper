@@ -269,3 +269,48 @@ SELECT u.*, COUNT(p.id) as post_count FROM users u LEFT JOIN posts p ON u.id = p
 		})
 	}
 }
+
+// A PL/SQL body carries semicolons of its own, and Oracle marks its end with a
+// slash on a line by itself. Splitting on the semicolon cut the body at its
+// first inner statement and lost everything after it in the file.
+func TestOracle_ParseRoutineBody(t *testing.T) {
+	const ddl = `CREATE TABLE users (id NUMBER PRIMARY KEY)
+/
+CREATE OR REPLACE TRIGGER touch_users BEFORE INSERT ON users FOR EACH ROW
+BEGIN
+  :NEW.id := 1;
+  :NEW.id := :NEW.id + 1;
+END;
+/
+CREATE TABLE orders (id NUMBER PRIMARY KEY)
+/`
+
+	schema, err := NewOracle().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 2, "the table after the trigger has to survive")
+	assert.Equal(t, "orders", schema.Tables[1].Name)
+
+	assert.Len(t, schema.Triggers, 1)
+	assert.Contains(t, schema.Triggers[0].Body, ":NEW.id + 1", "the whole body has to survive")
+}
+
+// CREATE TABLESPACE begins with the CREATE TABLE keyword as a prefix, and a
+// dispatcher that matched on the prefix alone sent it to the table parser, which
+// went looking for a column list that is not there.
+func TestOracle_TablespaceIsNotATable(t *testing.T) {
+	const ddl = `CREATE TABLESPACE example_data
+DATAFILE 'example_data.dbf' SIZE 100M
+AUTOEXTEND ON NEXT 50M MAXSIZE UNLIMITED;
+
+CREATE TABLE users (
+    id NUMBER PRIMARY KEY,
+    email VARCHAR2(255) NOT NULL
+);`
+
+	schema, err := NewOracle().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 1)
+	assert.Equal(t, "users", schema.Tables[0].Name)
+}

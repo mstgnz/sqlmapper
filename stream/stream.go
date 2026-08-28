@@ -1,13 +1,13 @@
 package stream
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 )
 
 // StreamParser represents an interface for streaming database dump operations
@@ -91,12 +91,17 @@ func (wp *WorkerPool) Wait() {
 	close(wp.errors)
 }
 
-// Process processes a stream of SQL statements in parallel
+// Process reads statements from reader and runs them through the pool.
+//
+// Both channels are drained to completion. Returning as soon as one of them
+// closed lost whatever was still buffered in the other: Wait closes the error
+// channel too, and a receive from a closed channel is always ready, so the
+// select would take that case at random and return nil with results still
+// waiting. A nil channel is never selected, which is how each one is retired
+// once it is drained.
 func (wp *WorkerPool) Process(reader io.Reader, callback func(SchemaObject) error) error {
-	// Start the worker pool
 	wp.Start()
 
-	// Start a goroutine to read statements and submit them to workers
 	go func() {
 		streamReader := NewStreamReader(reader, ";")
 		for {
@@ -118,20 +123,27 @@ func (wp *WorkerPool) Process(reader io.Reader, callback func(SchemaObject) erro
 		wp.Wait()
 	}()
 
-	// Process results and handle errors
-	for {
+	results, errs := wp.Results(), wp.Errors()
+	for results != nil || errs != nil {
 		select {
-		case obj, ok := <-wp.Results():
+		case obj, ok := <-results:
 			if !ok {
-				return nil
+				results = nil
+				continue
 			}
 			if err := callback(obj); err != nil {
 				return err
 			}
-		case err := <-wp.Errors():
+
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
 			return err
 		}
 	}
+	return nil
 }
 
 // SchemaObjectType represents the type of schema object
@@ -156,113 +168,25 @@ type SchemaObject struct {
 	Data interface{} // Table, View, Function, etc.
 }
 
-// StreamReader provides buffered reading of SQL statements
+// StreamReader reads a SQL dump one statement at a time.
+//
+// Splitting is delegated to internal/sqlsplit, which knows that a delimiter
+// inside a string, a comment, a quoted identifier, a PostgreSQL $$ body or a
+// MySQL DELIMITER block does not end a statement. Scanning for the delimiter
+// character alone cut every routine in half, and with it everything that
+// followed in the file.
 type StreamReader struct {
-	reader    *bufio.Reader
-	delimiter string
-	buffer    []byte
+	splitter *sqlsplit.Splitter
 }
 
-// NewStreamReader creates a new StreamReader with the given reader and delimiter
+// NewStreamReader creates a new StreamReader with the given reader and
+// delimiter. The delimiter selects the dialect's splitting rules: ";" for
+// MySQL, PostgreSQL and SQLite, "GO" for SQL Server, "/" for Oracle.
 func NewStreamReader(reader io.Reader, delimiter string) *StreamReader {
-	return &StreamReader{
-		reader:    bufio.NewReader(reader),
-		delimiter: delimiter,
-		buffer:    make([]byte, 0, 4096),
-	}
+	return &StreamReader{splitter: sqlsplit.New(reader, delimiter)}
 }
 
-// ReadStatement reads the next SQL statement from the reader
+// ReadStatement returns the next statement, or io.EOF at the end of the input.
 func (sr *StreamReader) ReadStatement() (string, error) {
-	var statement []byte
-	inString := false
-	inComment := false
-	lineComment := false
-	escaped := false
-
-	for {
-		b, err := sr.reader.ReadByte()
-		if err != nil {
-			if err == io.EOF && len(statement) > 0 {
-				return string(statement), nil
-			}
-			return "", err
-		}
-
-		// Handle string literals
-		if b == '\'' && !inComment && !escaped {
-			inString = !inString
-		}
-
-		// Handle escape characters
-		if b == '\\' && !inComment {
-			escaped = !escaped
-		} else {
-			escaped = false
-		}
-
-		// Handle comments
-		if !inString && !inComment && b == '-' {
-			nextByte, err := sr.reader.ReadByte()
-			if err == nil {
-				if nextByte == '-' {
-					lineComment = true
-					inComment = true
-					continue
-				}
-				// Only a byte that was actually read can be pushed back.
-				if err := sr.reader.UnreadByte(); err != nil {
-					return "", err
-				}
-			}
-		}
-
-		if !inString && !inComment && b == '/' {
-			nextByte, err := sr.reader.ReadByte()
-			if err == nil {
-				if nextByte == '*' {
-					inComment = true
-					continue
-				}
-				if err := sr.reader.UnreadByte(); err != nil {
-					return "", err
-				}
-			}
-		}
-
-		if inComment && !lineComment && b == '*' {
-			nextByte, err := sr.reader.ReadByte()
-			if err == nil {
-				if nextByte == '/' {
-					inComment = false
-					continue
-				}
-				if err := sr.reader.UnreadByte(); err != nil {
-					return "", err
-				}
-			}
-		}
-
-		if lineComment && b == '\n' {
-			inComment = false
-			lineComment = false
-			continue
-		}
-
-		// Skip comments
-		if inComment {
-			continue
-		}
-
-		// Add character to statement
-		statement = append(statement, b)
-
-		// Check for delimiter
-		if !inString && len(statement) >= len(sr.delimiter) {
-			lastIdx := len(statement) - len(sr.delimiter)
-			if string(statement[lastIdx:]) == sr.delimiter {
-				return string(statement[:lastIdx]), nil
-			}
-		}
-	}
+	return sr.splitter.Next()
 }

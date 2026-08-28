@@ -113,9 +113,18 @@ Each dialect uses the delimiter its own dumps use, which matters when you build 
 
 `CREATE OR REPLACE` is understood everywhere it is legal; the optional keywords are folded away before the statement is classified.
 
+The reader knows that a delimiter is not always one. A semicolon inside a string
+literal, a comment, a quoted identifier, a PostgreSQL `$$ ... $$` body or a
+`BEGIN ... END` block does not end a statement, and a mysqldump `DELIMITER ;;`
+directive is followed rather than parsed. Routine bodies therefore arrive whole,
+including the multi-statement ones.
+
+Nested blocks are the exception. A body whose inner block closes with its own
+`END;` ends the statement there, so a routine written that way is still cut
+short.
+
 ## Limitations
 
-- **Statement splitting is delimiter based.** The reader tracks string literals and comments, so a semicolon inside a quoted value is safe. A semicolon inside a `BEGIN ... END` block or a `$$ ... $$` body is not: such a statement gets split and will fail to parse.
 - **A parser instance holds state.** Use one per goroutine. `ParseStreamParallel` handles this internally, but do not share a parser across your own goroutines.
 - **Errors abort the run.** There is no skip-and-continue mode. One unparseable statement ends the stream.
 - **An index arrives without its table.** `SchemaObject` has no field naming the table an index belongs to, so a consumer that needs the association has to track it from the surrounding statements.

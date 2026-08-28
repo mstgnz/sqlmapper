@@ -12,7 +12,10 @@ COPY . .
 # The library is pure Go: no cgo, no sqlite client, no compiler toolchain in the
 # image. Building the module root would produce an ar archive rather than a
 # binary, so the command package is named explicitly.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+ARG VERSION=docker
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/sqlmapper ./cmd/sqlmapper
 
 # Final stage

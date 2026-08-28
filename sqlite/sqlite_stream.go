@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/keyword"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -47,7 +48,7 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 		dispatch := dispatchKey(statement)
 
 		// Parse CREATE TABLE statements
-		if strings.HasPrefix(dispatch, "CREATE TABLE") {
+		if keyword.HasPrefix(dispatch, "CREATE TABLE") {
 			table, err := p.parseTableStatement(statement)
 			if err != nil {
 				return err
@@ -193,7 +194,7 @@ func (p *SQLiteStreamParser) parseStatement(statement string) (*stream.SchemaObj
 	upperStatement := dispatchKey(statement)
 
 	switch {
-	case strings.HasPrefix(upperStatement, "CREATE TABLE"):
+	case keyword.HasPrefix(upperStatement, "CREATE TABLE"):
 		table, err := p.parseTableStatement(statement)
 		if err != nil {
 			return nil, err

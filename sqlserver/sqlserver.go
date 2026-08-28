@@ -6,9 +6,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
@@ -177,7 +181,7 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 		upperStmt := bytes.ToUpper(stmt)
 
 		switch {
-		case bytes.HasPrefix(upperStmt, []byte("CREATE TABLE")):
+		case keyword.HasPrefixBytes(upperStmt, "CREATE TABLE"):
 			table, err := s.parseCreateTable(stmt)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing CREATE TABLE: %v", err)
@@ -220,30 +224,31 @@ func (s *SQLServer) splitStatements(content []byte) [][]byte {
 	s.buf.Reset()
 
 	// First split by GO statements
-	content = []byte(stripSQLComments(string(content)))
+	// Splitting on GO and then again on every semicolon truncated a procedure
+	// body at its first inner statement. The splitter treats GO as the only
+	// terminator here, which is what SQL Server itself does, and it drops
+	// comments so a statement is not hidden behind one.
+	splitter := sqlsplit.New(bytes.NewReader(content), "GO")
 
-	goBlocks := bytes.Split(content, []byte("GO"))
+	for {
+		raw, err := splitter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil
+		}
 
-	for _, block := range goBlocks {
-		block = bytes.TrimSpace(block)
-		if len(block) == 0 {
+		stmt := bytes.TrimSpace([]byte(raw))
+		if len(stmt) == 0 {
 			continue
 		}
-
-		// Then split each GO block by semicolons
-		stmts := bytes.Split(block, []byte(";"))
-		for _, stmt := range stmts {
-			stmt = bytes.TrimSpace(stmt)
-			if len(stmt) == 0 || bytes.HasPrefix(stmt, []byte("--")) {
-				continue
-			}
-			// "ALTER TABLE x CHECK CONSTRAINT y" only re-enables a constraint
-			// that was already declared; there is nothing in it to parse.
-			if mssCheckOnlyRe.Match(stmt) {
-				continue
-			}
-			statements = append(statements, []byte(normalizeSQLServerDDL(string(stmt))))
+		// "ALTER TABLE x CHECK CONSTRAINT y" only re-enables a constraint that
+		// was already declared; there is nothing in it to parse.
+		if mssCheckOnlyRe.Match(stmt) {
+			continue
 		}
+		statements = append(statements, []byte(normalizeSQLServerDDL(string(stmt))))
 	}
 
 	return statements
@@ -581,7 +586,11 @@ func (s *SQLServer) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 
 	// Extract column definitions. Splitting on every comma would cut a
 	// definition in half at IDENTITY(1,1) or decimal(10, 2).
-	columnsBytes := stmt[startIdx+endIdx+1 : bytes.LastIndex(stmt, []byte(")"))]
+	bodyEnd := bytes.LastIndex(stmt, []byte(")"))
+	if bodyEnd <= startIdx+endIdx {
+		return table, fmt.Errorf("invalid CREATE TABLE statement")
+	}
+	columnsBytes := stmt[startIdx+endIdx+1 : bodyEnd]
 	columnDefs := splitTopLevelCommasBytes(columnsBytes)
 
 	for _, colDef := range columnDefs {

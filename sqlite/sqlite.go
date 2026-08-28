@@ -5,9 +5,13 @@ package sqlite
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
 )
@@ -47,29 +51,34 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, fmt.Errorf("empty content")
 	}
 
-	content = stripSQLComments(content)
-
 	s.buf = bytes.NewBuffer([]byte(content))
 	s.schema = &sqlmapper.Schema{}
 
-	// Split content into statements
-	statements := bytes.Split([]byte(content), []byte(";"))
+	// Splitting on every semicolon cut a trigger body at its first inner
+	// statement: the trigger was still registered, but its body arrived empty.
+	// The splitter knows a delimiter inside a body, a string or a comment is not
+	// a terminator, and it drops comments so a statement is not hidden behind
+	// one.
+	splitter := sqlsplit.New(strings.NewReader(content), ";")
 
-	for _, stmt := range statements {
-		stmt = bytes.TrimSpace(stmt)
-		if len(stmt) == 0 {
-			continue
+	for {
+		raw, err := splitter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading statement: %v", err)
 		}
 
-		// Skip comments
-		if bytes.HasPrefix(stmt, []byte("--")) || bytes.HasPrefix(stmt, []byte("/*")) {
+		stmt := bytes.TrimSpace([]byte(raw))
+		if len(stmt) == 0 {
 			continue
 		}
 
 		upperStmt := bytes.ToUpper(stmt)
 
 		switch {
-		case bytes.HasPrefix(upperStmt, []byte("CREATE TABLE")):
+		case keyword.HasPrefixBytes(upperStmt, "CREATE TABLE"):
 			table, err := s.parseCreateTable(stmt)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing CREATE TABLE: %v", err)
@@ -263,49 +272,62 @@ func (s *SQLite) parseCreateTrigger(stmt []byte) (sqlmapper.Trigger, error) {
 	triggerName := string(bytes.Trim(parts[2], "`"))
 	trigger.Name = triggerName
 
-	upperStmt := bytes.ToUpper(stmt)
+	// Everything before BEGIN describes the trigger; everything after it is the
+	// body. Splitting there first matters because the body has statements of its
+	// own: a trigger that updates a row says UPDATE inside its body, and reading
+	// the event off the whole statement picked that up instead of the header.
+	header, body := stmt, []byte(nil)
+	if loc := triggerBodyRe.FindSubmatchIndex(stmt); loc != nil {
+		header = stmt[:loc[0]]
+		body = bytes.TrimSpace(stmt[loc[2]:loc[3]])
+	}
+	trigger.Body = string(body)
+
+	upperHeader := bytes.ToUpper(header)
 
 	// Extract timing (BEFORE/AFTER)
 	switch {
-	case bytes.Contains(upperStmt, []byte("BEFORE")):
+	case bytes.Contains(upperHeader, []byte("BEFORE")):
 		trigger.Timing = "BEFORE"
-	case bytes.Contains(upperStmt, []byte("AFTER")):
+	case bytes.Contains(upperHeader, []byte("AFTER")):
 		trigger.Timing = "AFTER"
+	case bytes.Contains(upperHeader, []byte("INSTEAD OF")):
+		trigger.Timing = "INSTEAD OF"
 	}
 
 	// Extract event (INSERT/UPDATE/DELETE)
 	switch {
-	case bytes.Contains(upperStmt, []byte("INSERT")):
+	case bytes.Contains(upperHeader, []byte("INSERT")):
 		trigger.Event = "INSERT"
-	case bytes.Contains(upperStmt, []byte("UPDATE")):
+	case bytes.Contains(upperHeader, []byte("UPDATE")):
 		trigger.Event = "UPDATE"
-	case bytes.Contains(upperStmt, []byte("DELETE")):
+	case bytes.Contains(upperHeader, []byte("DELETE")):
 		trigger.Event = "DELETE"
 	}
 
-	// Extract table name
-	if idx := bytes.Index(upperStmt, []byte(" ON ")); idx != -1 {
-		rest := stmt[idx+4:]
-		if spaceIdx := bytes.Index(rest, []byte(" ")); spaceIdx != -1 {
-			tableName := bytes.TrimSpace(rest[:spaceIdx])
-			// Remove schema prefix if exists
-			if dotIdx := bytes.LastIndex(tableName, []byte(".")); dotIdx != -1 {
-				tableName = tableName[dotIdx+1:]
-			}
-			trigger.Table = string(bytes.Trim(tableName, "`"))
-		}
-	}
+	trigger.ForEachRow = bytes.Contains(upperHeader, []byte("FOR EACH ROW"))
 
-	// Extract trigger body
-	if idx := bytes.Index(upperStmt, []byte(" BEGIN ")); idx != -1 {
-		endIdx := bytes.LastIndex(upperStmt, []byte(" END"))
-		if endIdx != -1 {
-			trigger.Body = string(bytes.TrimSpace(stmt[idx+7 : endIdx]))
+	// Extract table name
+	if m := triggerTableRe.FindSubmatch(header); m != nil {
+		tableName := m[1]
+		// Remove schema prefix if exists
+		if dotIdx := bytes.LastIndex(tableName, []byte(".")); dotIdx != -1 {
+			tableName = tableName[dotIdx+1:]
 		}
+		trigger.Table = string(bytes.Trim(tableName, "`\""))
 	}
 
 	return trigger, nil
 }
+
+// triggerBodyRe captures a trigger body. The keywords are matched with word
+// boundaries rather than surrounding spaces: real DDL puts a newline after
+// BEGIN, and looking for " BEGIN " left every such trigger with an empty body.
+var triggerBodyRe = regexp.MustCompile(`(?is)\bBEGIN\b(.*)\bEND\s*;?\s*$`)
+
+// triggerTableRe captures the table a trigger is attached to, which is the word
+// after ON in the header.
+var triggerTableRe = regexp.MustCompile("(?is)\\bON\\s+([`\"\\w.]+)")
 
 // splitAndTrim splits a string by commas and trims whitespace and backticks from each part.
 func (s *SQLite) splitAndTrim(str string) []string {
@@ -493,19 +515,23 @@ func (s *SQLite) parseViews(statement string) error {
 	return nil
 }
 
+// streamTriggerRe reads a whole CREATE TRIGGER statement. It is dot-matches-all
+// because a trigger body spans lines, and the previous pattern silently matched
+// nothing at all for any trigger written the way SQLite writes them.
+var streamTriggerRe = regexp.MustCompile(`(?is)CREATE\s+TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(DELETE|INSERT|UPDATE(?:\s+OF\s+[\w\s,]+?)?)\s+ON\s+([.\w]+)(?:\s+FOR\s+EACH\s+ROW)?(?:\s+WHEN\s+(.*?))?\s+BEGIN\b(.*)\bEND\s*;?\s*$`)
+
 func (s *SQLite) parseTriggers(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?([.\w]+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(DELETE|INSERT|UPDATE(?:\s+OF\s+[^ON]+)?)\s+ON\s+([.\w]+)(?:\s+FOR\s+EACH\s+ROW)?(?:\s+WHEN\s+([^BEGIN]+))?\s+BEGIN\s+(.*?)\s+END`)
-	matches := re.FindStringSubmatch(statement)
+	matches := streamTriggerRe.FindStringSubmatch(statement)
 
 	if len(matches) > 6 {
 		triggerName := matches[1]
 		trigger := sqlmapper.Trigger{
-			Timing:     matches[2],
-			Event:      matches[3],
+			Timing:     strings.ToUpper(matches[2]),
+			Event:      strings.ToUpper(matches[3]),
 			Table:      matches[4],
-			Condition:  matches[5],
-			Body:       matches[6],
-			ForEachRow: strings.Contains(statement, "FOR EACH ROW"),
+			Condition:  strings.TrimSpace(matches[5]),
+			Body:       strings.TrimSpace(matches[6]),
+			ForEachRow: strings.Contains(strings.ToUpper(statement), "FOR EACH ROW"),
 		}
 
 		// Parse schema if exists

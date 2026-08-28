@@ -190,25 +190,32 @@ func TestEnsureTerminated(t *testing.T) {
 }
 
 // streamRoutines exercises the object types that only appear in richer dumps.
-// The bodies deliberately contain no semicolon: the stream reader splits on the
-// delimiter, so a multi-statement routine body cannot survive it. That limit is
-// documented in docs/stream_processing.md.
-const streamRoutines = "CREATE FUNCTION add_one(n INT) RETURNS INT BEGIN RETURN n + 1 END;\n" +
-	"CREATE PROCEDURE touch_user(IN uid INT) BEGIN SELECT uid END;\n" +
-	"CREATE TRIGGER trg_users BEFORE INSERT ON users FOR EACH ROW BEGIN SET NEW.created_at = NOW() END;\n"
+// The bodies carry semicolons of their own, which is why mysqldump wraps them in
+// a DELIMITER block: the reader follows that directive, so the whole body
+// survives instead of being cut at its first inner statement.
+const streamRoutines = "DELIMITER ;;\n" +
+	"CREATE FUNCTION add_one(n INT) RETURNS INT BEGIN\n  SET @x = n;\n  RETURN @x + 1;\nEND ;;\n" +
+	"CREATE PROCEDURE touch_user(IN uid INT) BEGIN\n  SELECT uid;\n  SELECT uid + 1;\nEND ;;\n" +
+	"CREATE TRIGGER trg_users BEFORE INSERT ON users FOR EACH ROW BEGIN\n" +
+	"  SET NEW.created_at = NOW();\n  SET NEW.updated_at = NOW();\nEND ;;\n" +
+	"DELIMITER ;\n"
 
 func TestMySQLStreamParser_ParseRoutines(t *testing.T) {
 	parser := NewMySQLStreamParser()
 
 	var functions, procedures, triggers []string
+	bodies := map[string]string{}
 	err := parser.ParseStream(strings.NewReader(streamRoutines), func(obj stream.SchemaObject) error {
 		switch v := obj.Data.(type) {
 		case *sqlmapper.Function:
 			functions = append(functions, v.Name)
+			bodies[v.Name] = v.Body
 		case *sqlmapper.Procedure:
 			procedures = append(procedures, v.Name)
+			bodies[v.Name] = v.Body
 		case *sqlmapper.Trigger:
 			triggers = append(triggers, v.Name)
+			bodies[v.Name] = v.Body
 		}
 		return nil
 	})
@@ -217,6 +224,10 @@ func TestMySQLStreamParser_ParseRoutines(t *testing.T) {
 	assert.Equal(t, []string{"add_one"}, functions)
 	assert.Equal(t, []string{"touch_user"}, procedures)
 	assert.Equal(t, []string{"trg_users"}, triggers)
+
+	assert.Contains(t, bodies["add_one"], "RETURN @x + 1", "the whole body has to survive")
+	assert.Contains(t, bodies["touch_user"], "SELECT uid + 1")
+	assert.Contains(t, bodies["trg_users"], "NEW.updated_at")
 }
 
 func TestMySQLStreamParser_GenerateStreamRoutines(t *testing.T) {

@@ -2,22 +2,27 @@
 
 ## The CLI
 
-The whole flag set is four options. Anything else you read elsewhere does not exist.
+The whole flag set is five options. Anything else you read elsewhere does not exist. The full reference is in [cli.md](cli.md).
 
 ```bash
-sqlmapper --file=<path> --to=<target> [--from=<source>] [--out=<path>]
+sqlmapper --to=<target> [--file=<path>] [--from=<source>] [--out=<path>]
 ```
 
-| Flag     | Meaning                                                                         |
-| -------- | ------------------------------------------------------------------------------- |
-| `--file` | Input SQL dump. Required.                                                       |
-| `--to`   | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
-| `--from` | Source dialect. Detected from the dump when omitted.                            |
-| `--out`  | Output path. Defaults to `<input>_<target>.sql` beside the input.               |
+| Flag        | Meaning                                                                         |
+| ----------- | ------------------------------------------------------------------------------- |
+| `--to`      | Target dialect: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Required. |
+| `--file`    | Input SQL dump. `-` or omitted reads standard input.                            |
+| `--from`    | Source dialect. Detected from the dump when omitted.                            |
+| `--out`     | Output path. `-` writes standard output. Defaults to `<input>_<target>.sql` beside the input, or standard output when the input came from a pipe. |
+| `--version` | Print the version and exit.                                                     |
 
 Single and double dashes are equivalent, so `-file=dump.sql` and `--file=dump.sql` both work.
 
 There is no debug flag, no config file, no environment variable, and no dry-run mode. If you need any of those, open an issue.
+
+### Nothing comes out, and nothing is written
+
+The command read an empty standard input. That happens when `--file` is left off and nothing is piped in, and it reports `no input: pass --file or pipe a dump into the command`.
 
 ## Common failures
 
@@ -35,7 +40,7 @@ Always pass `--from` in scripts. Detection is a convenience for interactive use,
 
 The parsers are regular-expression based rather than a full SQL grammar. The usual causes:
 
-- A routine body containing the statement delimiter. `CREATE FUNCTION ... BEGIN ... ; ... END;` gets split at the inner semicolon. Extract those statements into their own file.
+- A routine body with nested blocks. An inner block closing with its own `END;` ends the statement there, so the rest of the body is read as a statement of its own. Extract such routines into their own file.
 - Vendor syntax the pattern does not cover. Reduce the dump to the failing statement to confirm, then open an issue with that fragment.
 
 ### The output is missing objects

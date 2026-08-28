@@ -186,3 +186,100 @@ func TestSQLServer_Generate_ComplexSchema(t *testing.T) {
 	_, err := s.Generate(schema)
 	assert.NoError(t, err)
 }
+
+// T-SQL bodies carry semicolons of their own and are terminated by GO. Splitting
+// on the semicolon cut the body at its first inner statement.
+func TestSQLServer_ParseRoutineBody(t *testing.T) {
+	const ddl = `CREATE TABLE users (id INT PRIMARY KEY)
+GO
+CREATE TRIGGER touch_users ON users AFTER INSERT AS
+BEGIN
+  SELECT 1;
+  SELECT 2;
+END
+GO
+CREATE TABLE orders (id INT PRIMARY KEY)
+GO`
+
+	schema, err := NewSQLServer().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 2, "the table after the trigger has to survive")
+	assert.Equal(t, "orders", schema.Tables[1].Name)
+
+	assert.Len(t, schema.Triggers, 1)
+	assert.Contains(t, schema.Triggers[0].Body, "SELECT 2", "the whole body has to survive")
+}
+
+func TestNormalizeSQLServerTypeName(t *testing.T) {
+	tests := map[string]string{
+		"NVARCHAR":         "varchar",
+		"varchar":          "varchar",
+		"NCHAR":            "char",
+		"ntext":            "text",
+		"bit":              "smallint",
+		"TINYINT":          "smallint",
+		"datetime2":        "timestamp",
+		"smalldatetime":    "timestamp",
+		"DATETIMEOFFSET":   "timestamp with time zone",
+		"uniqueidentifier": "uuid",
+		"money":            "decimal",
+		"smallmoney":       "decimal",
+		"image":            "blob",
+		"VARBINARY":        "blob",
+		"real":             "real",
+		"float":            "double precision",
+		"xml":              "text",
+		// Only the switch collapses whitespace; the fallback lower-cases the
+		// name and leaves it as written.
+		"CHARACTER   VARYING":   "character   varying",
+		"SomethingUnrecognised": "somethingunrecognised",
+	}
+
+	for in, want := range tests {
+		assert.Equal(t, want, normalizeSQLServerTypeName(in), "type %q", in)
+	}
+}
+
+func TestIsNumericLiteral(t *testing.T) {
+	for _, s := range []string{"0", "42", "-1", "3.14"} {
+		assert.True(t, isNumericLiteral(s), "%q should be numeric", s)
+	}
+	for _, s := range []string{"", "abc", "1a", "N'x'"} {
+		assert.False(t, isNumericLiteral(s), "%q should not be numeric", s)
+	}
+}
+
+func TestColumnIsAutoIncrement(t *testing.T) {
+	table := sqlmapper.Table{Columns: []sqlmapper.Column{
+		{Name: "id", AutoIncrement: true},
+		{Name: "email"},
+	}}
+
+	assert.True(t, columnIsAutoIncrement(table, "id"))
+	assert.False(t, columnIsAutoIncrement(table, "email"))
+	assert.False(t, columnIsAutoIncrement(table, "absent"))
+}
+
+func TestHasNamedUnique(t *testing.T) {
+	constraints := []sqlmapper.Constraint{
+		{Type: "UNIQUE", Columns: []string{"email"}},
+		{Type: "UNIQUE", Columns: []string{"a", "b"}},
+		{Type: "PRIMARY KEY", Columns: []string{"id"}},
+	}
+
+	assert.True(t, hasNamedUnique(constraints, "email"))
+	assert.False(t, hasNamedUnique(constraints, "a"), "a composite unique does not cover one column")
+	assert.False(t, hasNamedUnique(constraints, "id"))
+}
+
+func TestIsDeferred(t *testing.T) {
+	named := sqlmapper.Constraint{Name: "fk_orders_user", RefTable: "users", Columns: []string{"user_id"}}
+	anonymous := sqlmapper.Constraint{RefTable: "users", Columns: []string{"user_id"}}
+	other := sqlmapper.Constraint{RefTable: "carts", Columns: []string{"cart_id"}}
+
+	assert.True(t, isDeferred([]sqlmapper.Constraint{named}, named), "matched by name")
+	assert.True(t, isDeferred([]sqlmapper.Constraint{anonymous}, anonymous), "matched by target when unnamed")
+	assert.False(t, isDeferred([]sqlmapper.Constraint{anonymous}, other))
+	assert.False(t, isDeferred(nil, named))
+}

@@ -229,7 +229,7 @@ func TestRun(t *testing.T) {
 
 	t.Run("detects the source and writes the default output path", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		err := run([]string{"--file=" + inputPath, "--to=postgres"}, &stdout, &stderr)
+		err := run([]string{"--file=" + inputPath, "--to=postgres"}, strings.NewReader(""), &stdout, &stderr)
 		if err != nil {
 			t.Fatalf("run() = %v, stderr: %s", err, stderr.String())
 		}
@@ -242,15 +242,55 @@ func TestRun(t *testing.T) {
 		if !strings.Contains(string(got), "id SERIAL PRIMARY KEY") {
 			t.Errorf("converted SQL missing the serial column:\n%s", got)
 		}
-		if !strings.Contains(stdout.String(), "(mysql) to postgres") {
-			t.Errorf("stdout did not name the detected dialect: %q", stdout.String())
+		// The summary belongs on standard error: standard output is reserved
+		// for the converted SQL so the command can be used in a pipe.
+		if !strings.Contains(stderr.String(), "(mysql) to postgres") {
+			t.Errorf("stderr did not name the detected dialect: %q", stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout should be empty when writing to a file, got %q", stdout.String())
+		}
+	})
+
+	t.Run("reads standard input and writes standard output", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := run([]string{"--from=mysql", "--to=postgres"}, strings.NewReader(mysqlDump), &stdout, &stderr)
+		if err != nil {
+			t.Fatalf("run() = %v, stderr: %s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "id SERIAL PRIMARY KEY") {
+			t.Errorf("converted SQL missing the serial column:\n%s", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr should stay quiet in a pipe, got %q", stderr.String())
+		}
+	})
+
+	t.Run("writes standard output when asked with a dash", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := run([]string{"--file=" + inputPath, "--to=postgres", "--out=-"}, strings.NewReader(""), &stdout, &stderr)
+		if err != nil {
+			t.Fatalf("run() = %v, stderr: %s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "CREATE TABLE users") {
+			t.Errorf("expected the SQL on stdout, got %q", stdout.String())
+		}
+	})
+
+	t.Run("reports its version", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if err := run([]string{"--version"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+			t.Fatalf("run() = %v", err)
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Error("--version printed nothing")
 		}
 	})
 
 	t.Run("honours an explicit source and output path", func(t *testing.T) {
 		outPath := filepath.Join(dir, "explicit.sql")
 		var stdout, stderr bytes.Buffer
-		err := run([]string{"--file=" + inputPath, "--from=mysql", "--to=sqlite", "--out=" + outPath}, &stdout, &stderr)
+		err := run([]string{"--file=" + inputPath, "--from=mysql", "--to=sqlite", "--out=" + outPath}, strings.NewReader(""), &stdout, &stderr)
 		if err != nil {
 			t.Fatalf("run() = %v, stderr: %s", err, stderr.String())
 		}
@@ -269,23 +309,24 @@ func TestRunErrors(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name  string
+		args  []string
+		stdin string
+		want  string
 	}{
-		{"no flags", nil, "Usage:"},
-		{"missing target", []string{"--file=" + undetectable}, "Usage:"},
-		{"missing file", []string{"--to=mysql"}, "Usage:"},
-		{"unreadable file", []string{"--file=" + filepath.Join(dir, "nope.sql"), "--to=mysql"}, "cannot read input file"},
-		{"undetectable dialect", []string{"--file=" + undetectable, "--to=mysql"}, "could not detect"},
-		{"unknown source", []string{"--file=" + undetectable, "--from=db2", "--to=mysql"}, "unsupported source"},
-		{"unknown target", []string{"--file=" + undetectable, "--from=mysql", "--to=db2"}, "unsupported target"},
+		{"no flags", nil, "", "Usage:"},
+		{"missing target", []string{"--file=" + undetectable}, "", "Usage:"},
+		{"empty standard input", []string{"--to=mysql"}, "", "no input"},
+		{"unreadable file", []string{"--file=" + filepath.Join(dir, "nope.sql"), "--to=mysql"}, "", "cannot read input file"},
+		{"undetectable dialect", []string{"--file=" + undetectable, "--to=mysql"}, "", "could not detect"},
+		{"unknown source", []string{"--file=" + undetectable, "--from=db2", "--to=mysql"}, "", "unsupported source"},
+		{"unknown target", []string{"--file=" + undetectable, "--from=mysql", "--to=db2"}, "", "unsupported target"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			err := run(tt.args, &stdout, &stderr)
+			err := run(tt.args, strings.NewReader(tt.stdin), &stdout, &stderr)
 			if err == nil {
 				t.Fatalf("expected an error, stderr: %s", stderr.String())
 			}
@@ -304,7 +345,7 @@ func TestRunErrors(t *testing.T) {
 
 func TestRunRejectsUnknownFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"--nonsense"}, &stdout, &stderr); err == nil {
+	if err := run([]string{"--nonsense"}, strings.NewReader(""), &stdout, &stderr); err == nil {
 		t.Error("expected an error for an unknown flag")
 	}
 }

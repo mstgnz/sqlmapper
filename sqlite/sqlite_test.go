@@ -172,3 +172,48 @@ func TestSQLite_Generate_ComplexSchema(t *testing.T) {
 	_, err := s.Generate(schema)
 	assert.NoError(t, err)
 }
+
+// A trigger body spans several statements of its own. Splitting the file on
+// every semicolon cut the body at its first inner statement and dropped the rest
+// of the file with it, so the trigger was registered with an empty body and the
+// tables after it went missing.
+func TestSQLite_ParseTriggerBody(t *testing.T) {
+	const ddl = `CREATE TABLE users (id INTEGER PRIMARY KEY, updated_at TEXT);
+CREATE TRIGGER touch_users AFTER UPDATE ON users
+BEGIN
+  UPDATE users SET updated_at = 'first' WHERE id = NEW.id;
+  UPDATE users SET updated_at = 'second' WHERE id = NEW.id;
+END;
+CREATE TABLE orders (id INTEGER PRIMARY KEY);`
+
+	schema, err := NewSQLite().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 2, "the table after the trigger has to survive")
+	assert.Equal(t, "orders", schema.Tables[1].Name)
+
+	assert.Len(t, schema.Triggers, 1)
+	trigger := schema.Triggers[0]
+	assert.Equal(t, "touch_users", trigger.Name)
+	assert.Equal(t, "users", trigger.Table)
+	assert.Equal(t, "AFTER", trigger.Timing)
+	assert.Equal(t, "UPDATE", trigger.Event)
+	assert.Contains(t, trigger.Body, "'first'")
+	assert.Contains(t, trigger.Body, "'second'", "the whole body has to survive")
+	assert.NotContains(t, trigger.Body, "CREATE TABLE orders")
+}
+
+// The event is read off the header, not the whole statement. A trigger that
+// fires on INSERT while its body runs an UPDATE used to be recorded as UPDATE.
+func TestSQLite_ParseTriggerEventComesFromTheHeader(t *testing.T) {
+	const ddl = `CREATE TRIGGER log_insert AFTER INSERT ON users
+BEGIN
+  UPDATE counters SET n = n + 1;
+END;`
+
+	schema, err := NewSQLite().Parse(ddl)
+	assert.NoError(t, err)
+	assert.Len(t, schema.Triggers, 1)
+	assert.Equal(t, "INSERT", schema.Triggers[0].Event)
+	assert.Equal(t, "users", schema.Triggers[0].Table)
+}

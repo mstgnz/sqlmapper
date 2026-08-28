@@ -28,25 +28,44 @@ As a library:
 go get github.com/mstgnz/sqlmapper
 ```
 
-As a CLI:
+As a CLI, whichever suits the machine:
 
 ```bash
+# With Go
 go install github.com/mstgnz/sqlmapper/cmd/sqlmapper@latest
+
+# Or a prebuilt binary, no toolchain required on the server
+curl -fsSL -o /usr/local/bin/sqlmapper \
+  https://github.com/mstgnz/sqlmapper/releases/latest/download/sqlmapper-linux-amd64
+chmod +x /usr/local/bin/sqlmapper
+
+# Or the image
+docker run --rm -v "$PWD:/work" mstgnz/sqlmapper --file=dump.sql --to=postgres
 ```
+
+Release assets are named `sqlmapper-<os>-<arch>` and cover Linux, macOS and Windows on amd64 and arm64.
 
 ## Usage
 
 ### CLI
 
 ```bash
-# Source dialect detected from the dump
+# Source dialect detected from the dump, output beside the input
 sqlmapper --file=dump.sql --to=postgres
 
 # Or state it explicitly
 sqlmapper --file=dump.sql --from=mysql --to=postgres --out=schema.pg.sql
+
+# In a pipe: standard input to standard output
+mysqldump app | sqlmapper --from=mysql --to=postgres > app.pg.sql
+
+# Straight into the target database
+mysqldump --no-data app | sqlmapper --from=mysql --to=postgres | psql app
 ```
 
-Supported values for `--from` and `--to`: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`.
+Standard output carries the converted SQL and nothing else; the summary line goes to standard error, and only when the result was written to a file.
+
+Supported values for `--from` and `--to`: `mysql`, `postgres`, `sqlite`, `oracle`, `sqlserver`. Full flag reference and more recipes are in [docs/cli.md](docs/cli.md).
 
 ### Library
 
@@ -224,6 +243,16 @@ fidelity for a schema that actually loads:
   compares a bit to `1`, and view bodies and check expressions are carried over
   verbatim, so a real boolean target fails with
   `operator does not exist: boolean = integer`.
+
+## Documentation
+
+| Page                                             | What is in it                                                |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| [cli.md](docs/cli.md)                             | Installing and running the command, flags, pipe recipes       |
+| [api.md](docs/api.md)                             | The library API: parsers, generators, the schema types        |
+| [stream_processing.md](docs/stream_processing.md) | Streaming dumps too large to hold in memory                   |
+| [troubleshooting.md](docs/troubleshooting.md)     | What to do when a conversion comes out wrong                  |
+| [mysql.md](docs/mysql.md), [postgresql.md](docs/postgresql.md), [sqlite.md](docs/sqlite.md), [oracle.md](docs/oracle.md), [sqlserver.md](docs/sqlserver.md) | Per-dialect notes and type tables |
 
 ## Development
 

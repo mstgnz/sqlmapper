@@ -2,7 +2,9 @@ package stream
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"io"
 	"strings"
 	"testing"
@@ -215,4 +217,61 @@ func TestWorkerPool(t *testing.T) {
 			tt.validate(t, objects, err)
 		})
 	}
+}
+
+// TestWorkerPoolDrainsEveryResult pins the fix for a pool that returned early.
+//
+// Wait closes the error channel as well as the result channel, and a receive
+// from a closed channel is always ready, so the select in Process took that
+// case at random and returned nil while results were still buffered. It lost an
+// object in roughly one run in thirteen, silently.
+func TestWorkerPoolDrainsEveryResult(t *testing.T) {
+	const runs = 300
+
+	for i := 0; i < runs; i++ {
+		parser := &MockStreamParser{
+			parseStreamFunc: func(reader io.Reader, callback func(SchemaObject) error) error {
+				buf := new(bytes.Buffer)
+				if _, err := buf.ReadFrom(reader); err != nil {
+					return err
+				}
+				stmt := strings.TrimSpace(buf.String())
+				for _, name := range []string{"users", "posts", "orders"} {
+					if strings.Contains(stmt, name) {
+						return callback(SchemaObject{Type: TableObject, Data: name})
+					}
+				}
+				return nil
+			},
+		}
+
+		var got []SchemaObject
+		err := NewWorkerPool(2, parser).Process(
+			strings.NewReader("CREATE TABLE users (id INT);CREATE TABLE posts (id INT);CREATE TABLE orders (id INT);"),
+			func(obj SchemaObject) error {
+				got = append(got, obj)
+				return nil
+			})
+
+		require.NoError(t, err)
+		require.Len(t, got, 3, "run %d dropped an object", i)
+	}
+}
+
+// TestWorkerPoolReportsParserErrors checks the other side of the same select:
+// an error still has to reach the caller rather than being drowned out by the
+// results arriving alongside it.
+func TestWorkerPoolReportsParserErrors(t *testing.T) {
+	parser := &MockStreamParser{
+		parseStreamFunc: func(reader io.Reader, callback func(SchemaObject) error) error {
+			return errors.New("invalid SQL syntax")
+		},
+	}
+
+	err := NewWorkerPool(2, parser).Process(
+		strings.NewReader("BROKEN;"),
+		func(SchemaObject) error { return nil })
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid SQL syntax")
 }

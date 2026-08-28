@@ -5,9 +5,13 @@ package oracle
 import (
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlsplit"
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/expr"
@@ -216,46 +220,26 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, errors.New("empty content")
 	}
 
-	// Split the SQL statements
+	// Splitting on every semicolon truncated a PL/SQL body at its first inner
+	// statement: the trigger was registered but its body arrived empty. The
+	// splitter knows a semicolon inside a body is not a terminator and that a
+	// slash on its own line is.
+	//
+	// Statements are then collapsed onto one line, because the patterns below
+	// were written against the line-joined form this replaced.
 	var statements []string
-	var currentStmt strings.Builder
-	lines := strings.Split(content, "\n")
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	splitter := sqlsplit.New(strings.NewReader(content), "/")
+	for {
+		raw, err := splitter.Next()
+		if err == io.EOF {
+			break
 		}
-
-		if line == "/" {
-			if currentStmt.Len() > 0 {
-				statements = append(statements, currentStmt.String())
-				currentStmt.Reset()
-			}
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("error reading statement: %v", err)
 		}
-
-		if strings.HasSuffix(line, ";") {
-			// The separator matters here as much as in the branch below: without
-			// it a view header ending in AS was glued to its SELECT.
-			if currentStmt.Len() > 0 {
-				currentStmt.WriteString(" ")
-			}
-			currentStmt.WriteString(line[:len(line)-1])
-			if currentStmt.Len() > 0 {
-				statements = append(statements, currentStmt.String())
-				currentStmt.Reset()
-			}
-		} else {
-			if currentStmt.Len() > 0 {
-				currentStmt.WriteString(" ")
-			}
-			currentStmt.WriteString(line)
+		if joined := strings.Join(strings.Fields(raw), " "); joined != "" {
+			statements = append(statements, joined)
 		}
-	}
-
-	if currentStmt.Len() > 0 {
-		statements = append(statements, currentStmt.String())
 	}
 
 	for _, stmt := range statements {
@@ -265,7 +249,7 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		}
 
 		// CREATE TABLE
-		if strings.HasPrefix(strings.ToUpper(stmt), "CREATE TABLE") {
+		if keyword.HasPrefix(stmt, "CREATE TABLE") {
 			table, err := o.parseCreateTable(stmt)
 			if err != nil {
 				return nil, err
@@ -344,8 +328,14 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 	// at anything inside the table body.
 	stmt = normalizeOracleDDL(stmt)
 
-	// Parse the columns
-	columnsStr := stmt[strings.Index(stmt, "(")+1 : strings.LastIndex(stmt, ")")]
+	// Parse the columns. A statement that reached here without a column list is
+	// not a CREATE TABLE at all, or is truncated; either way slicing on the
+	// missing parenthesis would panic.
+	open, close := strings.Index(stmt, "("), strings.LastIndex(stmt, ")")
+	if open == -1 || close < open {
+		return table, fmt.Errorf("no columns found in CREATE TABLE statement")
+	}
+	columnsStr := stmt[open+1 : close]
 	// Splitting on every comma would cut a definition in half at the comma inside
 	// NUMBER(10,2) or inside a CHECK list, so the split tracks parentheses and
 	// string literals.

@@ -28,17 +28,26 @@ jobs:
       - name: Run tests
         run: go test -race -v ./...
 
-      # The package path matters: building the module root compiles the library
-      # and writes an ar archive, so the release used to ship files that were
-      # not executables at all.
+      # Two things are load-bearing here. The package path: building the module
+      # root compiles the library and writes an ar archive, so the release used
+      # to ship files that were not executables at all. And the tag stamped into
+      # the binary, without which sqlmapper --version reports the pseudo-version
+      # the toolchain derives from the checkout rather than the release.
       - name: Build
         run: |
-          GOOS=linux GOARCH=amd64 go build -o sqlmapper-linux-amd64 ./cmd/sqlmapper
-          GOOS=linux GOARCH=arm64 go build -o sqlmapper-linux-arm64 ./cmd/sqlmapper
-          GOOS=darwin GOARCH=amd64 go build -o sqlmapper-darwin-amd64 ./cmd/sqlmapper
-          GOOS=darwin GOARCH=arm64 go build -o sqlmapper-darwin-arm64 ./cmd/sqlmapper
-          GOOS=windows GOARCH=amd64 go build -o sqlmapper-windows-amd64.exe ./cmd/sqlmapper
+          LDFLAGS="-s -w -X main.version=${{ github.ref_name }}"
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            out="sqlmapper-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = windows ]; then
+              out="${out}.exe"
+            fi
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath -ldflags="$LDFLAGS" -o "$out" ./cmd/sqlmapper
+          done
           file sqlmapper-linux-amd64
+          ./sqlmapper-linux-amd64 --version
 
       # actions/create-release and actions/upload-release-asset are archived by
       # GitHub and no longer maintained; this action replaces both and uploads
@@ -78,6 +87,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: |
             mstgnz/sqlmapper:latest
             mstgnz/sqlmapper:${{ github.ref_name }}

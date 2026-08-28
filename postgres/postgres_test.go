@@ -447,3 +447,38 @@ CREATE UNIQUE INDEX idx_price ON products(price);`),
 		})
 	}
 }
+
+// A PL/pgSQL body is wrapped in dollar quotes precisely because it contains
+// semicolons. Splitting on the semicolon cut it at its first inner statement.
+func TestPostgreSQL_ParseRoutineBody(t *testing.T) {
+	const ddl = `CREATE TABLE users (id bigint PRIMARY KEY);
+CREATE FUNCTION bump(n integer) RETURNS integer AS $$
+BEGIN
+  n := n + 1;
+  RETURN n;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE orders (id bigint PRIMARY KEY);`
+
+	schema, err := NewPostgreSQL().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 2, "the table after the function has to survive")
+	assert.Equal(t, "orders", schema.Tables[1].Name)
+
+	assert.Len(t, schema.Functions, 1)
+	assert.Contains(t, schema.Functions[0].Body, "RETURN n", "the whole body has to survive")
+}
+
+// CREATE TABLESPACE begins with the CREATE TABLE keyword as a prefix, and must
+// not be read as a table.
+func TestPostgreSQL_TablespaceIsNotATable(t *testing.T) {
+	const ddl = `CREATE TABLESPACE fastspace LOCATION '/ssd/pg';
+CREATE TABLE users (id bigint PRIMARY KEY);`
+
+	schema, err := NewPostgreSQL().Parse(ddl)
+	assert.NoError(t, err)
+
+	assert.Len(t, schema.Tables, 1)
+	assert.Equal(t, "users", schema.Tables[0].Name)
+}

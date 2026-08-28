@@ -174,3 +174,35 @@ func TestSQLiteStreamParser_SerialAndParallelAgree(t *testing.T) {
 		})
 	}
 }
+
+// The stream parser has its own trigger pattern, and it was not dot-matches-all,
+// so a trigger written across several lines matched nothing and was dropped.
+func TestSQLiteStreamParser_TriggerBody(t *testing.T) {
+	const ddl = `CREATE TABLE users (id INTEGER PRIMARY KEY, updated_at TEXT);
+CREATE TRIGGER touch_users AFTER UPDATE ON users
+FOR EACH ROW
+BEGIN
+  UPDATE users SET updated_at = 'first' WHERE id = NEW.id;
+  UPDATE users SET updated_at = 'second' WHERE id = NEW.id;
+END;
+CREATE TABLE orders (id INTEGER PRIMARY KEY);`
+
+	var triggers []*sqlmapper.Trigger
+	var tables []*sqlmapper.Table
+	err := NewSQLiteStreamParser().ParseStream(strings.NewReader(ddl), func(obj stream.SchemaObject) error {
+		switch v := obj.Data.(type) {
+		case *sqlmapper.Trigger:
+			triggers = append(triggers, v)
+		case *sqlmapper.Table:
+			tables = append(tables, v)
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+
+	assert.Len(t, tables, 2)
+	assert.Len(t, triggers, 1)
+	assert.Equal(t, "touch_users", triggers[0].Name)
+	assert.True(t, triggers[0].ForEachRow)
+	assert.Contains(t, triggers[0].Body, "'second'")
+}

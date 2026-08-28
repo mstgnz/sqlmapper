@@ -235,6 +235,16 @@ func TestNormalizeSQLServerDefault(t *testing.T) {
 	assert.Equal(t, "CURRENT_TIMESTAMP", normalizeSQLServerDefault("(sysutcdatetime())"))
 	assert.Equal(t, "CURRENT_TIMESTAMP", normalizeSQLServerDefault("(getdate())"))
 	assert.Equal(t, "draft", normalizeSQLServerDefault("('draft')"))
+	assert.Equal(t, "CURRENT_TIMESTAMP", normalizeSQLServerDefault("(SYSDATETIME())"))
+	assert.Equal(t, "CURRENT_TIMESTAMP", normalizeSQLServerDefault("CURRENT_TIMESTAMP"))
+
+	// A generated GUID has no portable equivalent, so it is dropped rather than
+	// carried over as a call the target cannot make.
+	assert.Empty(t, normalizeSQLServerDefault("(newid())"))
+	assert.Empty(t, normalizeSQLServerDefault("NEWSEQUENTIALID()"))
+
+	// An unbalanced pair is left alone rather than stripped into nonsense.
+	assert.Equal(t, "(a))", normalizeSQLServerDefault("(a))"))
 }
 
 func TestSQLServerGenerateFromForeignSchema(t *testing.T) {

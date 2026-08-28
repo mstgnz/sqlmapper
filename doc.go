@@ -60,6 +60,16 @@ and pg_dump, but they are not full SQL grammars: deeply nested procedural bodies
 and exotic syntax can be missed. Review the generated SQL before running it
 against anything you care about.
 
+# Command line
+
+The same conversion is available as a command, which reads a file or standard
+input and writes a file or standard output:
+
+	go install github.com/mstgnz/sqlmapper/cmd/sqlmapper@latest
+
+	sqlmapper --file=dump.sql --to=postgres
+	mysqldump app | sqlmapper --from=mysql --to=postgres > app.pg.sql
+
 # Streaming
 
 For dumps too large to hold in memory, each dialect ships a stream parser that
