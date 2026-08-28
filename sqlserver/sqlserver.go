@@ -1061,6 +1061,17 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 		s.buf.WriteString(routines)
 	}
 
+	// MySQL, SQL Server and SQLite check every constraint per statement and have
+	// no deferral. Dropping it in silence turns a schema that works into one that
+	// rejects its own data, so it is stated.
+	for _, table := range schema.Tables {
+		for _, c := range table.Constraints {
+			if c.Deferrable {
+				s.buf.WriteString(sqlfmt.DeferrableNote(c.Name, c.Initially))
+			}
+		}
+	}
+
 	// Grants come last: they name tables, views and routines, all of which have
 	// to exist before the grant is read.
 	if perms := s.generatePermissionsSQL(schema); perms != "" {

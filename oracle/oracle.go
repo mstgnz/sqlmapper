@@ -1342,6 +1342,7 @@ func (o *Oracle) generateConstraintSQL(c sqlmapper.Constraint) string {
 	case "CHECK":
 		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.Oracle)))
 	}
+	sb.WriteString(sqlfmt.DeferrableClause(c.Deferrable, c.Initially))
 	return sb.String()
 }
 

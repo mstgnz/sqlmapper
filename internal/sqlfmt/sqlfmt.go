@@ -288,3 +288,31 @@ func UntypedGeneratedNote(source, table, column, expression string) string {
 			"  ALTER TABLE %s ADD COLUMN %s <type> GENERATED ALWAYS AS (%s) STORED;",
 		table, column, source, table, column, expression)) + "\n"
 }
+
+// DeferrableClause renders a constraint's deferral for a target that has one.
+//
+// It was read by nothing and written by nothing. Deferral says the constraint is
+// checked at the end of the transaction rather than at each statement, which is
+// what lets a pair of rows referencing each other be inserted at all: losing it
+// turns a schema that works into one that rejects its own data.
+func DeferrableClause(deferrable bool, initially string) string {
+	if !deferrable {
+		return ""
+	}
+	if strings.EqualFold(initially, "DEFERRED") {
+		return " DEFERRABLE INITIALLY DEFERRED"
+	}
+	return " DEFERRABLE INITIALLY IMMEDIATE"
+}
+
+// DeferrableNote states a deferral the target cannot hold.
+func DeferrableNote(name string, initially string) string {
+	which := name
+	if which == "" {
+		which = "a constraint"
+	}
+	// The leading newline is part of the note: it is written after whatever the
+	// generator last emitted, which does not always end its own line.
+	return fmt.Sprintf("\n-- not carried, this target checks every constraint per statement: %s was DEFERRABLE INITIALLY %s\n",
+		which, strings.ToUpper(initially))
+}

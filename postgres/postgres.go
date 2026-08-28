@@ -136,12 +136,23 @@ var (
 	// attributes begin.
 	pgReturnStopRe = regexp.MustCompile(`(?is)\s+(?:LANGUAGE|AS|SET|SECURITY|STABLE|IMMUTABLE|VOLATILE|STRICT|PARALLEL|COST|ROWS|WINDOW|LEAKPROOF|CALLED|RETURNS)\b`)
 	pgProcRe       = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+PROCEDURE\s+([\w.]+)\s*\((.*?)\)\s+LANGUAGE\s+(\w+)\s+AS\s+\$\$(.*?)\$\$`)
-	pgTriggerRe    = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(INSERT|UPDATE|DELETE)\s+ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
-	pgCondTrigRe   = regexp.MustCompile(`(?i)CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+(?:UPDATE\s+OF\s+[\w.]+\s+)?ON\s+([\w.]+)\s+(?:FOR\s+EACH\s+ROW\s+)?WHEN\s+\((.+?)\)\s+EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
-	pgGrantRe      = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgGrantAllRe   = regexp.MustCompile(`(?i)GRANT\s+ALL\s+PRIVILEGES\s+ON\s+(?:ALL\s+TABLES\s+IN\s+SCHEMA\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgGrantExecRe  = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)\s*\([^)]*\)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
-	pgRevokeRe     = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+FROM\s+(\w+)\s*;`)
+	// One pattern, with the optional parts optional. There used to be two, and
+	// between them they did not cover the language: a trigger with a plain event
+	// and a WHEN clause, BEFORE INSERT ... WHEN (...), matched neither and was
+	// lost whole, while the UPDATE OF form matched the second, which captured no
+	// event at all.
+	pgTriggerRe = regexp.MustCompile(`(?i)CREATE\s+(?:CONSTRAINT\s+)?TRIGGER\s+(\w+)\s+` +
+		`(BEFORE|AFTER|INSTEAD\s+OF)\s+` +
+		`(INSERT|UPDATE|DELETE|TRUNCATE)(?:\s+OR\s+(?:INSERT|UPDATE|DELETE|TRUNCATE))*` +
+		`(?:\s+OF\s+[\w.",\s]+?)?\s+` +
+		`ON\s+([\w.]+)` +
+		`(?:\s+FOR\s+EACH\s+(ROW|STATEMENT))?` +
+		`(?:\s+WHEN\s+\((.+?)\))?` +
+		`\s+EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)`)
+	pgGrantRe     = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgGrantAllRe  = regexp.MustCompile(`(?i)GRANT\s+ALL\s+PRIVILEGES\s+ON\s+(?:ALL\s+TABLES\s+IN\s+SCHEMA\s+)?([\w.]+)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgGrantExecRe = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:FUNCTION|PROCEDURE)\s+([\w.]+)\s*\([^)]*\)\s+TO\s+(\w+)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;`)
+	pgRevokeRe    = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+(?:TABLE\s+)?([\w.]+)\s+FROM\s+(\w+)\s*;`)
 
 	pgTableCommentRe = regexp.MustCompile(`(?i)COMMENT\s+ON\s+TABLE\s+([\w.]+)\s+IS\s+'([^']+)'\s*;`)
 	pgColCommentRe   = regexp.MustCompile(`(?i)COMMENT\s+ON\s+COLUMN\s+([\w.]+)\.(\w+)\s+IS\s+'([^']+)'\s*;`)
@@ -1110,6 +1121,18 @@ func (p *PostgreSQL) parseConstraint(def string) (sqlmapper.Constraint, error) {
 		}
 	}
 
+	// DEFERRABLE was read by nothing. It says the constraint is checked at the
+	// end of the transaction rather than at each statement, which is what lets a
+	// pair of rows referencing each other be inserted at all, so losing it turns
+	// a schema that works into one that rejects its own data.
+	if strings.Contains(defUpper, "DEFERRABLE") && !strings.Contains(defUpper, "NOT DEFERRABLE") {
+		c.Deferrable = true
+		c.Initially = "IMMEDIATE"
+		if strings.Contains(defUpper, "INITIALLY DEFERRED") {
+			c.Initially = "DEFERRED"
+		}
+	}
+
 	return c, nil
 }
 
@@ -1286,35 +1309,22 @@ func (p *PostgreSQL) parseFunctions(content string) error {
 
 func (p *PostgreSQL) parseTriggers(content string) error {
 	for _, m := range pgTriggerRe.FindAllStringSubmatch(content, -1) {
-		if len(m) < 6 {
+		if len(m) < 8 {
 			continue
 		}
 		trig := sqlmapper.Trigger{
-			Name: m[1], Timing: m[2], Event: m[3],
-			Body: m[5], ForEachRow: strings.Contains(m[0], "FOR EACH ROW"),
+			Name:       m[1],
+			Timing:     strings.ToUpper(strings.Join(strings.Fields(m[2]), " ")),
+			Event:      strings.ToUpper(m[3]),
+			Condition:  strings.TrimSpace(m[6]),
+			Body:       m[7],
+			ForEachRow: strings.EqualFold(m[5], "ROW"),
 		}
 		if parts := strings.Split(m[4], "."); len(parts) > 1 {
 			trig.Schema = parts[0]
 			trig.Table = parts[1]
 		} else {
 			trig.Table = m[4]
-		}
-		p.schema.Triggers = append(p.schema.Triggers, trig)
-	}
-
-	for _, m := range pgCondTrigRe.FindAllStringSubmatch(content, -1) {
-		if len(m) < 6 {
-			continue
-		}
-		trig := sqlmapper.Trigger{
-			Name: m[1], Timing: m[2], Condition: m[4],
-			Body: m[5], ForEachRow: strings.Contains(m[0], "FOR EACH ROW"),
-		}
-		if parts := strings.Split(m[3], "."); len(parts) > 1 {
-			trig.Schema = parts[0]
-			trig.Table = parts[1]
-		} else {
-			trig.Table = m[3]
 		}
 		p.schema.Triggers = append(p.schema.Triggers, trig)
 	}
@@ -1634,6 +1644,7 @@ func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 	case "CHECK":
 		fmt.Fprintf(&sb, "CHECK (%s)", expr.Condition(c.CheckExpression, expr.PostgreSQL))
 	}
+	sb.WriteString(sqlfmt.DeferrableClause(c.Deferrable, c.Initially))
 	return sb.String()
 }
 

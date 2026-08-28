@@ -363,6 +363,17 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(routines)
 	}
 
+	// MySQL, SQL Server and SQLite check every constraint per statement and have
+	// no deferral. Dropping it in silence turns a schema that works into one that
+	// rejects its own data, so it is stated.
+	for _, table := range schema.Tables {
+		for _, c := range table.Constraints {
+			if c.Deferrable {
+				result.WriteString(sqlfmt.DeferrableNote(c.Name, c.Initially))
+			}
+		}
+	}
+
 	// Neither MySQL nor SQLite has a sequence. A serial column carries its own
 	// counter, so the sequences that back one are already accounted for; the
 	// rest are stated rather than dropped without a word.

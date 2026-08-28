@@ -283,3 +283,115 @@ func TestMaterializedViewStaysMaterialized(t *testing.T) {
 		}
 	}
 }
+
+// TestDeferrableSurvives holds a constraint property nothing read and nothing
+// wrote. Deferral says the constraint is checked at the end of the transaction
+// rather than at each statement, which is what lets a pair of rows referencing
+// each other be inserted at all: losing it turns a schema that works into one
+// that rejects its own data.
+func TestDeferrableSurvives(t *testing.T) {
+	schema, err := alterParsers["postgres"]().Parse(
+		"CREATE TABLE p (id integer PRIMARY KEY);\nCREATE TABLE c (pid integer);\n" +
+			"ALTER TABLE ONLY c ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED;\n" +
+			"ALTER TABLE ONLY c ADD CONSTRAINT uq UNIQUE (pid) NOT DEFERRABLE;\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	var deferred, plain bool
+	for _, tb := range schema.Tables {
+		for _, c := range tb.Constraints {
+			switch c.Name {
+			case "fk":
+				deferred = c.Deferrable && c.Initially == "DEFERRED"
+			case "uq":
+				// NOT DEFERRABLE is not deferrable, which the substring alone
+				// would have got backwards.
+				plain = !c.Deferrable
+			}
+		}
+	}
+	if !deferred {
+		t.Error("the deferral was not read")
+	}
+	if !plain {
+		t.Error("NOT DEFERRABLE was read as deferrable")
+	}
+
+	// PostgreSQL and Oracle both defer a constraint.
+	for _, target := range []string{"postgres", "oracle"} {
+		t.Run(target+"_carries_it", func(t *testing.T) {
+			out, err := alterParsers[target]().Generate(schema)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if !strings.Contains(out, "DEFERRABLE INITIALLY DEFERRED") {
+				t.Errorf("the deferral was dropped:\n%s", out)
+			}
+		})
+	}
+
+	// The other three check every constraint per statement and say so.
+	for _, target := range []string{"mysql", "sqlserver", "sqlite"} {
+		t.Run(target+"_states_it", func(t *testing.T) {
+			out, err := alterParsers[target]().Generate(schema)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if !strings.Contains(out, "checks every constraint per statement") {
+				t.Errorf("the deferral went without a word:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestConditionalTriggerIsRead pins the trigger form that used to be lost whole.
+// Two patterns read triggers and between them they did not cover the language:
+// a plain event with a WHEN clause matched neither.
+func TestConditionalTriggerIsRead(t *testing.T) {
+	cases := []struct {
+		sql         string
+		name, event string
+		condition   string
+	}{
+		{"CREATE TRIGGER a BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();", "a", "INSERT", ""},
+		{"CREATE TRIGGER b BEFORE INSERT ON t FOR EACH ROW WHEN (NEW.n > 0) EXECUTE FUNCTION f();", "b", "INSERT", "NEW.n > 0"},
+		{"CREATE TRIGGER c AFTER UPDATE OF n ON t FOR EACH ROW WHEN (OLD.n <> NEW.n) EXECUTE FUNCTION f();", "c", "UPDATE", "OLD.n <> NEW.n"},
+		{"CREATE TRIGGER d AFTER DELETE ON t FOR EACH ROW WHEN (OLD.n > 0) EXECUTE FUNCTION f();", "d", "DELETE", "OLD.n > 0"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			schema, err := alterParsers["postgres"]().Parse("CREATE TABLE t (n integer);\n" + c.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(schema.Triggers) != 1 {
+				t.Fatalf("the trigger was lost: %+v", schema.Triggers)
+			}
+			tr := schema.Triggers[0]
+			if tr.Name != c.name {
+				t.Errorf("name = %q", tr.Name)
+			}
+			// The second pattern captured no event at all, so a conditional
+			// trigger came back not knowing what fires it.
+			if tr.Event != c.event {
+				t.Errorf("event = %q, want %q", tr.Event, c.event)
+			}
+			if tr.Condition != c.condition {
+				t.Errorf("condition = %q, want %q", tr.Condition, c.condition)
+			}
+			if !tr.ForEachRow {
+				t.Error("FOR EACH ROW was not read")
+			}
+
+			out, err := alterParsers["postgres"]().Generate(schema)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if c.condition != "" && !strings.Contains(out, "WHEN "+c.condition) {
+				t.Errorf("the condition did not survive:\n%s", out)
+			}
+		})
+	}
+}

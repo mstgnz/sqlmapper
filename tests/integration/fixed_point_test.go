@@ -251,7 +251,8 @@ func withoutNotes(sql string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "-- not carried") ||
 			strings.Contains(trimmed, "was partial in the source") ||
-			strings.Contains(trimmed, "states no type for it") {
+			strings.Contains(trimmed, "states no type for it") ||
+			strings.Contains(trimmed, "checks every constraint per statement") {
 			continue
 		}
 		kept = append(kept, line)

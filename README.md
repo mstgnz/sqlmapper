@@ -282,6 +282,12 @@ have none: the index widens into a full one and the dropped filter is written
 above it as a comment, because a conditional unique index that silently becomes
 unconditional starts rejecting rows that were legal before.
 
+A deferrable constraint keeps its deferral where the target has one, which is
+PostgreSQL and Oracle. That clause is what lets two rows referencing each other
+be inserted in one transaction, so losing it turns a schema that works into one
+that rejects its own data. MySQL, SQL Server and SQLite check every constraint
+per statement and state the deferral they cannot hold.
+
 MySQL is the only one of the five with an unsigned integer. It is written back
 there, and on the other four the column takes the narrowest type that still
 holds its range: an unsigned `int` becomes a `bigint`, an unsigned `bigint`
