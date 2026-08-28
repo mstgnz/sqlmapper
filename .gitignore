@@ -42,3 +42,6 @@ examples/files/output/*.sql
 /sqlmapper-linux-*
 /sqlmapper-darwin-*
 /sqlmapper-windows-*
+
+# Built binaries
+bin/

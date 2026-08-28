@@ -292,16 +292,18 @@ fidelity for a schema that actually loads:
 ## Development
 
 ```bash
-go test ./...            # unit and integration tests
-go test -race ./...      # the stream parsers are exercised concurrently
-go test -cover ./...     # every package is kept above 85%
-go run ./examples        # end-to-end conversions over the sample dumps
-golangci-lint run ./...  # the check set is pinned in .golangci.yml
+make check     # everything CI runs, in the same order
+make test      # unit and integration tests
+make test-race # the stream parsers are exercised concurrently
+make cover     # per-package coverage, failing below the 85% floor
+make examples  # end-to-end conversions over the sample dumps
+make lint      # the check set is pinned in .golangci.yml
+make build     # the command, into ./bin
 ```
 
-CI runs all of the above, plus `gofmt` and `go vet`, on every push and pull
-request. The linter version is pinned so a new release cannot turn a pull
-request red on its own.
+`make` on its own lists every target. `make check` is the whole CI pipeline, so
+a red build can be reproduced with one command. The linter version is pinned so
+a new release cannot turn a pull request red on its own.
 
 ## Contributing
 
