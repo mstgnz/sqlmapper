@@ -318,6 +318,13 @@ moves the name everywhere it is used. A constraint over a column that no longer
 exists cannot be built, so leaving either behind produces a file that fails to
 load.
 
+`DROP` is replayed the same way, for a table, an index, a view, a sequence or a
+type. Dropping a table takes the foreign keys onto it, which would otherwise
+reference something that no longer exists. One rule keeps a dump readable: a
+drop that something later in the file recreates made room and removed nothing.
+Every dump tool writes `DROP TABLE IF EXISTS` ahead of the `CREATE` that
+replaces it, and treating those as real deleted the whole schema.
+
 The replay runs after the `CREATE` statements rather than interleaved with
 them. For a file that creates a table before altering it, which is every dump
 and every migration, the result is the same. The streaming parsers do not
@@ -325,6 +332,12 @@ replay `ALTER` at all: they hand back one object per statement and hold no
 schema for a later statement to change. Whole-file `Parse` is what the CLI
 uses, and the stream is for a dump too large to hold, which is `CREATE`-heavy
 by nature.
+
+SQL Server has one type the others do not: an alias, which names an existing
+type rather than describing a shape. It is read and written back, and for the
+other four the columns that used it are resolved to the type it stands for.
+That loses nothing, since an alias is exactly its base type, and it beats
+stating a type nobody can create while leaving the column pointing at it.
 
 Every SQL Server script opens with `SET ANSI_NULLS ON` and
 `SET QUOTED_IDENTIFIER ON`, the way SSMS writes one. Without them a filtered

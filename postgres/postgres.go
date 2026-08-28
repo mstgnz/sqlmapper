@@ -273,6 +273,12 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		return "", errors.New("empty schema")
 	}
 
+	// SQL Server is the only dialect with an alias type, and a column naming one
+	// means nothing here. The alias is exactly its base type, so the columns are
+	// resolved to it rather than left pointing at something this target cannot
+	// create.
+	schema = sqlmapper.ResolveAliasTypes(schema)
+
 	var result strings.Builder
 
 	// Dump tools do not order tables by dependency, so a child table can precede
@@ -286,7 +292,7 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		// A composite type's definition is another dialect's text, so it is
 		// stated rather than emitted when it did not come from here.
 		if !schema.TypeIsPortable(typ, sqlmapper.PostgreSQL) {
-			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition))
+			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Kind, typ.Definition))
 			result.WriteString("\n\n")
 			continue
 		}

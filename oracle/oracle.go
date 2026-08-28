@@ -322,9 +322,10 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		// ALTER, held back and replayed once every table is read: a rename or a
 		// drop has to find what it names. Only ADD CONSTRAINT was read before,
 		// and an ALTER TABLE ADD COLUMN was discarded without a word.
-		if keyword.HasPrefix(upperStmt, "ALTER TABLE") {
-			deferredAlters = append(deferredAlters, stmt)
-		}
+		// Every statement is handed to the replay, not only the ones it acts
+		// on: a drop that a later CREATE undoes can only be recognised by
+		// seeing that CREATE.
+		deferredAlters = append(deferredAlters, stmt)
 
 		// GRANT and REVOKE, which arrive as statements of their own.
 		if o.parsePermission(stmt) {
@@ -835,6 +836,12 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 		return "", errors.New("empty schema")
 	}
 
+	// SQL Server is the only dialect with an alias type, and a column naming one
+	// means nothing here. The alias is exactly its base type, so the columns are
+	// resolved to it rather than left pointing at something this target cannot
+	// create.
+	schema = sqlmapper.ResolveAliasTypes(schema)
+
 	var result strings.Builder
 
 	// Create sequences. The stream generator's renderer is used, which carries
@@ -849,7 +856,7 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 	// kept it one way round and lost it the other.
 	for _, typ := range schema.Types {
 		if !schema.TypeIsPortable(typ, sqlmapper.Oracle) {
-			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition))
+			result.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Kind, typ.Definition))
 			result.WriteString("\n\n")
 			continue
 		}

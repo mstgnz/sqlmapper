@@ -192,6 +192,14 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 
 		upperStmt := bytes.ToUpper(stmt)
 
+		// Every statement is handed to the replay, not only the ones it acts
+		// on: a drop that a later CREATE undoes can only be recognised by
+		// seeing that CREATE. This is collected before the switch rather than
+		// inside it, so it cannot shadow a case: matching EXEC in the switch to
+		// catch sp_rename once took sp_addextendedproperty with it and stopped
+		// every comment being read.
+		deferredAlters = append(deferredAlters, string(stmt))
+
 		switch {
 		case keyword.HasPrefixBytes(upperStmt, "CREATE TABLE"):
 			table, err := s.parseCreateTable(stmt)
@@ -208,6 +216,9 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 		case bytes.HasPrefix(upperStmt, []byte("GRANT ")), bytes.HasPrefix(upperStmt, []byte("REVOKE ")):
 			s.parsePermission(stmt)
 
+		case keyword.HasPrefixBytes(upperStmt, "CREATE TYPE"):
+			s.parseCreateType(stmt)
+
 		case keyword.HasPrefixBytes(upperStmt, "CREATE SEQUENCE"):
 			seq, err := s.parseCreateSequence(stmt)
 			if err != nil {
@@ -219,17 +230,10 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 			if err := s.parseAlterTable(stmt); err != nil {
 				return nil, fmt.Errorf("error parsing ALTER TABLE: %v", err)
 			}
-			// parseAlterTable reads the constraint forms only; the rest is
-			// held back.
-			deferredAlters = append(deferredAlters, string(stmt))
-
 		// SQL Server has no RENAME statement and scripts one as a procedure
 		// call, which is why a rename never looked like an ALTER at all. Only
 		// sp_rename is claimed: matching every EXEC shadowed the extended
 		// property case above it and every comment stopped being read.
-		case mssSpRenameRe.Match(upperStmt):
-			deferredAlters = append(deferredAlters, string(stmt))
-
 		case bytes.HasPrefix(upperStmt, []byte("CREATE VIEW")):
 			view, err := s.parseCreateView(stmt)
 			if err != nil {
@@ -984,6 +988,27 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 	// top rather than guessed at per statement.
 	s.buf.WriteString(mssScriptPreamble)
 
+	// Types come before the tables that declare a column of one. A type that
+	// came from elsewhere is stated rather than emitted, the same way the other
+	// generators state a foreign one.
+	for _, typ := range schema.Types {
+		// T-SQL has no enumerated type. A column of one is written as a varchar
+		// carrying the values, so there is nothing to declare here: emitting the
+		// value list as an alias produced CREATE TYPE x FROM 'a', 'b', which
+		// does not load.
+		if strings.EqualFold(typ.Kind, "ENUM") {
+			continue
+		}
+		// An alias is the only type SQL Server can build. Anything else came
+		// from a dialect whose form it does not have.
+		if !strings.EqualFold(typ.Kind, "ALIAS") {
+			s.buf.WriteString(sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Kind, typ.Definition))
+			s.buf.WriteString("\n")
+			continue
+		}
+		fmt.Fprintf(s.buf, "CREATE TYPE %s FROM %s;\nGO\n", typ.Name, typ.Definition)
+	}
+
 	// Sequences come first: a column default may name one.
 	for _, seq := range schema.Sequences {
 		fmt.Fprintf(s.buf, "%s;\nGO\n", s.generateSequenceSQL(seq))
@@ -1072,16 +1097,38 @@ func (s *SQLServer) parsePermission(stmt []byte) bool {
 	return false
 }
 
-// mssSpRenameRe recognises the procedure call SQL Server uses for a rename. It
-// is matched narrowly rather than by the EXEC keyword, which would also claim
-// sp_addextendedproperty and take every comment with it.
-var mssSpRenameRe = regexp.MustCompile(`(?i)^\s*EXEC(?:UTE)?\s+(?:SYS\.)?SP_RENAME\b`)
-
 // mssScriptPreamble is what SSMS opens every generated script with. A filtered
 // index is refused without it: "CREATE INDEX failed because the following SET
 // options have incorrect settings: 'QUOTED_IDENTIFIER'" (Msg 1934). An indexed
 // view and a persisted computed column want the same.
 const mssScriptPreamble = "SET ANSI_NULLS ON;\nGO\nSET QUOTED_IDENTIFIER ON;\nGO\n\n"
+
+// mssAliasTypeRe reads a SQL Server alias type, which names an existing type
+// rather than describing a new shape: CREATE TYPE dbo.phone FROM VARCHAR(20).
+//
+// Nothing read one, so a schema declaring a type and using it lost the
+// declaration. The columns that use it still name it, which is why the type has
+// to travel even though only SQL Server can build one.
+var mssAliasTypeRe = regexp.MustCompile(`(?is)^\s*CREATE\s+TYPE\s+([\[\]."\w]+)\s+FROM\s+(.+?)\s*;?\s*$`)
+
+// parseCreateType reads an alias type.
+func (s *SQLServer) parseCreateType(stmt []byte) bool {
+	m := mssAliasTypeRe.FindSubmatch(stmt)
+	if m == nil {
+		return false
+	}
+
+	typ := sqlmapper.Type{
+		Kind:       "ALIAS",
+		Name:       splitBracketedName(string(m[1])),
+		Definition: strings.TrimSpace(string(m[2])),
+	}
+	if raw := string(m[1]); strings.Contains(raw, ".") {
+		typ.Schema = unbracketIdent(strings.SplitN(raw, ".", 2)[0])
+	}
+	s.schema.Types = append(s.schema.Types, typ)
+	return true
+}
 
 // mssSequenceNameRe reads the name off a CREATE SEQUENCE, which SSMS brackets
 // and schema-qualifies.

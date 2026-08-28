@@ -172,7 +172,7 @@ func TestPartialIndexNote(t *testing.T) {
 }
 
 func TestForeignType(t *testing.T) {
-	got := ForeignType("oracle", "addr_t", `OBJECT ("STREET" VARCHAR2(100))`)
+	got := ForeignType("oracle", "addr_t", "COMPOSITE", `OBJECT ("STREET" VARCHAR2(100))`)
 
 	// Every line is commented out: the point is that it must not execute.
 	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
@@ -191,7 +191,7 @@ func TestForeignType(t *testing.T) {
 
 	// A schema built by hand carries no source dialect, and the note still has
 	// to name something.
-	if !strings.Contains(ForeignType("", "t", "x"), "Defined by the source") {
+	if !strings.Contains(ForeignType("", "t", "", "x"), "Defined by the source") {
 		t.Error("an unknown provenance still reads as a sentence")
 	}
 }
@@ -213,5 +213,20 @@ func TestSplitTopLevelCommasBytes(t *testing.T) {
 	}
 	if len(want) != 3 {
 		t.Fatalf("want three columns, got %d: %q", len(want), want)
+	}
+}
+
+// TestForeignTypeUsesTheSourcesKeyword checks the note reads as the source
+// wrote it. SQL Server's alias is declared with FROM, and showing it with AS
+// states a statement nobody wrote.
+func TestForeignTypeUsesTheSourcesKeyword(t *testing.T) {
+	alias := ForeignType("sqlserver", "phone", "ALIAS", "VARCHAR(20) NOT NULL")
+	if !strings.Contains(alias, "CREATE TYPE phone FROM VARCHAR(20) NOT NULL;") {
+		t.Errorf("an alias is declared with FROM: %q", alias)
+	}
+
+	shape := ForeignType("oracle", "addr_t", "COMPOSITE", "OBJECT (street VARCHAR2(100))")
+	if !strings.Contains(shape, "CREATE TYPE addr_t AS OBJECT") {
+		t.Errorf("a shape is declared with AS: %q", shape)
 	}
 }

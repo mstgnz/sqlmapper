@@ -297,3 +297,73 @@ func TestStreamDoesNotReplayAlter(t *testing.T) {
 		})
 	}
 }
+
+// TestDropIsReplayed reads a schema that creates two tables and then drops one.
+// A file that created a table and dropped it used to keep both, so the output
+// declared something the source no longer had.
+func TestDropIsReplayed(t *testing.T) {
+	base := map[string]string{
+		"postgres":  "CREATE TABLE keep (a integer);\nCREATE TABLE gone (b integer);\nDROP TABLE gone;\n",
+		"mysql":     "CREATE TABLE keep (a int);\nCREATE TABLE gone (b int);\nDROP TABLE gone;\n",
+		"oracle":    "CREATE TABLE keep (a NUMBER)\n/\nCREATE TABLE gone (b NUMBER)\n/\nDROP TABLE gone\n/\n",
+		"sqlserver": "CREATE TABLE keep (a INT);\nGO\nCREATE TABLE gone (b INT);\nGO\nDROP TABLE gone;\nGO\n",
+		"sqlite":    "CREATE TABLE keep (a INTEGER);\nCREATE TABLE gone (b INTEGER);\nDROP TABLE gone;\n",
+	}
+
+	for _, d := range alterDialects {
+		t.Run(d, func(t *testing.T) {
+			schema, err := alterParsers[d]().Parse(base[d])
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			var names []string
+			for _, tb := range schema.Tables {
+				names = append(names, tb.Name)
+			}
+			if len(names) != 1 || !strings.EqualFold(names[0], "keep") {
+				t.Errorf("tables = %v, want [keep]", names)
+			}
+		})
+	}
+}
+
+// TestMakeRoomDropIsNotADrop is the rule that keeps a dump readable. Every dump
+// tool writes a drop ahead of the CREATE that replaces it, and treating those
+// as real deleted the whole schema.
+func TestMakeRoomDropIsNotADrop(t *testing.T) {
+	dumps := map[string]string{
+		"postgres": "DROP TABLE IF EXISTS keep;\nCREATE TABLE keep (a integer);\n",
+		"mysql":    "DROP TABLE IF EXISTS `keep`;\nCREATE TABLE `keep` (a int);\n",
+		"sqlite":   "DROP TABLE IF EXISTS keep;\nCREATE TABLE keep (a INTEGER);\n",
+		"sqlserver": "IF OBJECT_ID('keep') IS NOT NULL DROP TABLE keep;\nGO\n" +
+			"CREATE TABLE keep (a INT);\nGO\n",
+	}
+
+	for d, dump := range dumps {
+		t.Run(d, func(t *testing.T) {
+			schema, err := alterParsers[d]().Parse(dump)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(schema.Tables) != 1 {
+				t.Errorf("the make-room drop removed the table it made room for: %+v", schema.Tables)
+			}
+		})
+	}
+}
+
+// TestFixturesSurviveTheirOwnDropStatements guards the comprehensive fixtures,
+// which are real dump output and carry the drops a dump tool writes.
+func TestFixturesSurviveTheirOwnDropStatements(t *testing.T) {
+	for _, d := range fullSchemas {
+		t.Run(d.name, func(t *testing.T) {
+			schema, err := d.parser().Parse(loadFullSchema(t, d.file))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(schema.Tables) < 3 {
+				t.Errorf("a drop in the dump removed a table it recreates: %d tables", len(schema.Tables))
+			}
+		})
+	}
+}

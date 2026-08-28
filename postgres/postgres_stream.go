@@ -417,7 +417,7 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 	for _, typ := range schema.Types {
 		stmt := sqlfmt.Terminate(p.postgres.generateTypeSQL(typ), ";")
 		if !schema.TypeIsPortable(typ, sqlmapper.PostgreSQL) {
-			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition)
+			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Kind, typ.Definition)
 		}
 		if _, err := writer.Write([]byte(stmt + "\n\n")); err != nil {
 			return err

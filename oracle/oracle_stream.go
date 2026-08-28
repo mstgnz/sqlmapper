@@ -416,7 +416,7 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		// file generator writes it.
 		stmt := sqlfmt.Terminate(p.oracle.generateTypeSQL(typ), ";") + "\n/"
 		if !schema.TypeIsPortable(typ, sqlmapper.Oracle) {
-			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Definition)
+			stmt = sqlfmt.ForeignType(string(schema.SourceDialect), typ.Name, typ.Kind, typ.Definition)
 		}
 		if _, err := writer.Write([]byte(stmt + "\n\n")); err != nil {
 			return err

@@ -283,3 +283,103 @@ func findColumn(t sqlmapper.Table, name string) (sqlmapper.Column, bool) {
 	}
 	return sqlmapper.Column{}, false
 }
+
+// TestApplyDropRemovesTheObject holds the drops that name a whole object rather
+// than a part of a table.
+func TestApplyDropRemovesTheObject(t *testing.T) {
+	s := testSchema()
+	s.Views = []sqlmapper.View{{Name: "v"}, {Name: "keep_v"}}
+	s.Sequences = []sqlmapper.Sequence{{Name: "sq"}, {Name: "keep_sq"}}
+	s.Types = []sqlmapper.Type{{Name: "ty"}, {Name: "keep_ty"}}
+
+	for _, stmt := range []string{
+		"DROP VIEW v;", "DROP SEQUENCE sq;", "DROP TYPE ty;",
+		"DROP INDEX ix_email;",
+	} {
+		run(t, s, stmt)
+	}
+
+	if len(s.Views) != 1 || s.Views[0].Name != "keep_v" {
+		t.Errorf("views = %+v", s.Views)
+	}
+	if len(s.Sequences) != 1 || s.Sequences[0].Name != "keep_sq" {
+		t.Errorf("sequences = %+v", s.Sequences)
+	}
+	if len(s.Types) != 1 || s.Types[0].Name != "keep_ty" {
+		t.Errorf("types = %+v", s.Types)
+	}
+	if len(s.Tables[0].Indexes) != 1 || s.Tables[0].Indexes[0].Name != "ix_id" {
+		t.Errorf("indexes = %+v", s.Tables[0].Indexes)
+	}
+}
+
+// TestApplyDropTableTakesTheKeysOntoIt checks a foreign key onto the dropped
+// table goes with it. Left behind, it references a table that no longer exists
+// and the whole file fails to load.
+func TestApplyDropTableTakesTheKeysOntoIt(t *testing.T) {
+	s := testSchema()
+	run(t, s, "DROP TABLE customers;")
+
+	if len(s.Tables) != 1 || s.Tables[0].Name != "orders" {
+		t.Fatalf("tables = %+v", s.Tables)
+	}
+	for _, c := range s.Tables[0].Constraints {
+		if strings.EqualFold(c.RefTable, "customers") {
+			t.Error("a key onto the dropped table survived")
+		}
+	}
+}
+
+// TestApplyAllIgnoresAMakeRoomDrop is the rule that keeps a dump readable.
+//
+// Every dump tool writes DROP TABLE IF EXISTS ahead of the CREATE that replaces
+// it. Replaying those after the CREATEs had been read deleted the whole schema,
+// which is what this caught. A drop that nothing recreates still applies.
+func TestApplyAllIgnoresAMakeRoomDrop(t *testing.T) {
+	s := &sqlmapper.Schema{Tables: []sqlmapper.Table{
+		{Name: "keep", Columns: []sqlmapper.Column{{Name: "a", DataType: "int"}}},
+		{Name: "gone", Columns: []sqlmapper.Column{{Name: "b", DataType: "int"}}},
+	}}
+
+	ApplyAll(s, []string{
+		"DROP TABLE IF EXISTS keep",
+		"CREATE TABLE keep (a int)",
+		"DROP TABLE IF EXISTS gone",
+		"CREATE TABLE gone (b int)",
+		"DROP TABLE gone",
+	}, Reader{Column: readColumn})
+
+	if len(s.Tables) != 1 || s.Tables[0].Name != "keep" {
+		var names []string
+		for _, t := range s.Tables {
+			names = append(names, t.Name)
+		}
+		t.Errorf("tables = %v, want [keep]", names)
+	}
+}
+
+// TestLastCreatedReadsTheDumpToolsForms checks the CREATE reader against the
+// shapes a dump actually writes. What sits between CREATE and the object
+// keyword is skipped rather than enumerated: listing the keywords missed the
+// real view in a MySQL dump, whose CREATE and whose VIEW keyword sit in
+// different version blocks with the attributes between them.
+func TestLastCreatedReadsTheDumpToolsForms(t *testing.T) {
+	statements := []string{
+		"CREATE TABLE public.customers (id int)",
+		"CREATE OR REPLACE VIEW active AS SELECT 1",
+		"CREATE UNIQUE NONCLUSTERED INDEX ix_a ON [dbo].[t] (a)",
+		"CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v` AS select 1",
+		"CREATE TABLE IF NOT EXISTS `later` (id int)",
+		"ALTER TABLE t ADD COLUMN x int",
+	}
+	got := lastCreated(statements)
+
+	for _, name := range []string{"customers", "active", "ix_a", "v", "later"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("%q was not recognised as created: %v", name, got)
+		}
+	}
+	if len(got) != 5 {
+		t.Errorf("something extra was read as a create: %v", got)
+	}
+}

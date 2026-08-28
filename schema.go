@@ -1,6 +1,7 @@
 package sqlmapper
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper/internal/expr"
@@ -119,6 +120,72 @@ type Comment struct {
 	Object  string // TABLE or COLUMN
 	Name    string // the table, or table.column
 	Comment string
+}
+
+// ResolveAliasTypes rewrites the columns that name an alias type into the type
+// the alias stands for.
+//
+// SQL Server is the only dialect with an alias, which names an existing type
+// rather than describing a new shape: CREATE TYPE dbo.phone FROM VARCHAR(20).
+// A target that cannot build one still has to declare the columns that used it,
+// and "mobile dbo.phone" names nothing there. The alias is exactly its base
+// type, so resolving the column loses nothing, which is better than stating a
+// type nobody can create and leaving the column pointing at it.
+//
+// The schema is returned with the alias types removed: once the columns carry
+// the base type there is nothing left for them to say.
+func ResolveAliasTypes(schema *Schema) *Schema {
+	aliases := map[string]string{}
+	for _, t := range schema.Types {
+		if strings.EqualFold(t.Kind, "ALIAS") {
+			aliases[strings.ToLower(t.Name)] = t.Definition
+			if t.Schema != "" {
+				aliases[strings.ToLower(t.Schema+"."+t.Name)] = t.Definition
+			}
+		}
+	}
+	if len(aliases) == 0 {
+		return schema
+	}
+
+	// A copy, because a caller generating twice for two targets must not have
+	// the first one rewrite the schema under the second.
+	out := *schema
+	out.Tables = make([]Table, len(schema.Tables))
+	copy(out.Tables, schema.Tables)
+
+	for i := range out.Tables {
+		columns := make([]Column, len(out.Tables[i].Columns))
+		copy(columns, out.Tables[i].Columns)
+		for j := range columns {
+			base, ok := aliases[strings.ToLower(StripSchemaPrefix(columns[j].DataType))]
+			if !ok {
+				continue
+			}
+			// The base carries its own nullability, which belongs to the column.
+			if strings.Contains(strings.ToUpper(base), "NOT NULL") {
+				columns[j].IsNullable = false
+			}
+			base = strings.TrimSpace(
+				strings.ReplaceAll(strings.ReplaceAll(base, "NOT NULL", ""), "NULL", ""))
+
+			// The name and the size are separated rather than kept as one
+			// string, or the target's type map never sees the name: an alias
+			// over VARCHAR(20) reached Oracle as VARCHAR(20) instead of
+			// VARCHAR2(20).
+			columns[j].DataType, columns[j].Length, columns[j].Scale = splitTypeSize(base)
+		}
+		out.Tables[i].Columns = columns
+	}
+
+	var kept []Type
+	for _, t := range out.Types {
+		if !strings.EqualFold(t.Kind, "ALIAS") {
+			kept = append(kept, t)
+		}
+	}
+	out.Types = kept
+	return &out
 }
 
 // UntypedGeneratedColumns lists the computed columns a typed target cannot
@@ -630,4 +697,30 @@ func OrderTablesByDependency(tables []Table) ([]Table, map[string][]Constraint) 
 // exported in v1.1.0 and will be removed in the next major version.
 func IsJSONEmulationCheck(expression string) bool {
 	return expr.IsJSONGuardSQL(expression)
+}
+
+// splitTypeSize separates a rendered type into its name and its size.
+func splitTypeSize(rendered string) (name string, length, scale int) {
+	rendered = strings.TrimSpace(rendered)
+	open := strings.IndexByte(rendered, '(')
+	if open < 0 {
+		return rendered, 0, 0
+	}
+	closed := strings.LastIndexByte(rendered, ')')
+	if closed < open {
+		return rendered, 0, 0
+	}
+	name = strings.TrimSpace(rendered[:open])
+	for i, part := range strings.SplitN(rendered[open+1:closed], ",", 2) {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			continue
+		}
+		if i == 0 {
+			length = n
+		} else {
+			scale = n
+		}
+	}
+	return name, length, scale
 }

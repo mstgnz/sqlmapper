@@ -476,3 +476,42 @@ GO`
 	require.NoError(t, err)
 	assert.NotContains(t, empty, "GRANT")
 }
+
+// TestSQLServerAliasType pins the type SQL Server has that the others do not:
+// an alias naming an existing type rather than describing a new shape. Nothing
+// read one, so a schema declaring a type and using it lost the declaration.
+func TestSQLServerAliasType(t *testing.T) {
+	const script = `CREATE TYPE dbo.phone FROM VARCHAR(20) NOT NULL;
+GO
+CREATE TYPE shortcode FROM CHAR(4);
+GO
+CREATE TABLE t (id INT);
+GO`
+
+	schema, err := NewSQLServer().Parse(script)
+	require.NoError(t, err)
+	require.Len(t, schema.Types, 2)
+
+	assert.Equal(t, "phone", schema.Types[0].Name)
+	assert.Equal(t, "dbo", schema.Types[0].Schema)
+	assert.Equal(t, "ALIAS", schema.Types[0].Kind)
+	assert.Equal(t, "VARCHAR(20) NOT NULL", schema.Types[0].Definition)
+	assert.Equal(t, "shortcode", schema.Types[1].Name)
+	assert.Empty(t, schema.Types[1].Schema)
+
+	out, err := NewSQLServer().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, "CREATE TYPE phone FROM VARCHAR(20) NOT NULL;")
+	assert.Contains(t, out, "CREATE TYPE shortcode FROM CHAR(4);")
+
+	// A type from another dialect is stated rather than built: only SQL Server
+	// has this form, and an Oracle OBJECT is not one.
+	foreign := &sqlmapper.Schema{
+		SourceDialect: sqlmapper.Oracle,
+		Types:         []sqlmapper.Type{{Name: "addr_t", Definition: `OBJECT (street VARCHAR2(100))`}},
+	}
+	out, err = NewSQLServer().Generate(foreign)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Defined by the oracle source")
+	assert.NotContains(t, out, "\nCREATE TYPE addr_t")
+}

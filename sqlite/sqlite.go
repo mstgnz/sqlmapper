@@ -86,8 +86,11 @@ func (s *SQLite) Parse(content string) (*sqlmapper.Schema, error) {
 
 		upperStmt := bytes.ToUpper(stmt)
 
-		if keyword.HasPrefixBytes(upperStmt, "ALTER TABLE") {
-			deferredAlters = append(deferredAlters, string(stmt))
+		// Every statement is handed to the replay, not only the ones it acts
+		// on: a drop that a later CREATE undoes can only be recognised by
+		// seeing that CREATE.
+		deferredAlters = append(deferredAlters, string(stmt))
+		if keyword.HasPrefixBytes(upperStmt, "ALTER TABLE") || keyword.HasPrefixBytes(upperStmt, "DROP") {
 			continue
 		}
 
@@ -564,6 +567,12 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 	if schema == nil {
 		return "", fmt.Errorf("empty schema")
 	}
+
+	// SQL Server is the only dialect with an alias type, and a column naming one
+	// means nothing here. The alias is exactly its base type, so the columns are
+	// resolved to it rather than left pointing at something this target cannot
+	// create.
+	schema = sqlmapper.ResolveAliasTypes(schema)
 
 	s.buf.Reset()
 

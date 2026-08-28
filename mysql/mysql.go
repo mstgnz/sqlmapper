@@ -308,6 +308,12 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		return "", errors.New("empty schema")
 	}
 
+	// SQL Server is the only dialect with an alias type, and a column naming one
+	// means nothing here. The alias is exactly its base type, so the columns are
+	// resolved to it rather than left pointing at something this target cannot
+	// create.
+	schema = sqlmapper.ResolveAliasTypes(schema)
+
 	var result strings.Builder
 
 	// Dump tools do not order tables by dependency, so a child table can precede

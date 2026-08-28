@@ -1,9 +1,11 @@
 package alter
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/internal/keyword"
 )
 
 // Reader is what a dialect supplies so its own syntax is read by its own code.
@@ -36,6 +38,16 @@ func Apply(schema *sqlmapper.Schema, st Statement, read Reader) {
 	if schema == nil || read.Column == nil {
 		return
 	}
+	// The schema-level drops name an object rather than a table's part, so they
+	// are answered before a table is looked up.
+	switch st.Action {
+	case DropTable, DropIndex, DropView, DropSequence, DropType:
+		if len(st.Names) > 0 {
+			applyDrop(schema, st.Action, st.Names[0])
+		}
+		return
+	}
+
 	table := findTable(schema, st.Table)
 	if table == nil {
 		return
@@ -283,9 +295,122 @@ func replaceName(columns []string, from, to string) {
 // file that created a table, dropped it and created it again would need the
 // interleaved form, and no schema dump or migration writes one.
 func ApplyAll(schema *sqlmapper.Schema, statements []string, read Reader) {
-	for _, stmt := range statements {
-		if st, ok := Parse(stmt); ok {
-			Apply(schema, st, read)
+	// A drop that something later recreates made room; it did not remove
+	// anything. Every dump tool writes DROP TABLE IF EXISTS ahead of the CREATE
+	// that replaces it, and replaying those after the CREATEs had been read
+	// deleted the whole schema.
+	created := lastCreated(statements)
+
+	for i, stmt := range statements {
+		st, ok := Parse(stmt)
+		if !ok {
+			continue
 		}
+		if isDrop(st.Action) && len(st.Names) > 0 && created[strings.ToLower(st.Names[0])] > i {
+			continue
+		}
+		Apply(schema, st, read)
+	}
+}
+
+func isDrop(a Action) bool {
+	switch a {
+	case DropTable, DropIndex, DropView, DropSequence, DropType:
+		return true
+	}
+	return false
+}
+
+// createRe reads the name off a CREATE of a whole object, which is all that is
+// needed to know whether a drop earlier in the file was making room.
+//
+// What sits between CREATE and the object keyword is not enumerated but skipped:
+// OR REPLACE, UNIQUE, NONCLUSTERED, and the ALGORITHM, DEFINER and SQL SECURITY
+// a mysqldump view carries, in whatever order the dump tool wrote them. Listing
+// them missed the real view in a MySQL dump, whose CREATE and whose VIEW keyword
+// sit in different version blocks with the attributes between them.
+var createRe = regexp.MustCompile(`(?is)^\s*CREATE\b(?:.{0,300}?)\b(?:TABLE|INDEX|VIEW|SEQUENCE|TYPE)\s+` +
+	`(?:IF\s+NOT\s+EXISTS\s+)?([\[\]"` + "`" + `\w.]+)`)
+
+// lastCreated records, for each object name, the last statement that creates
+// it. A drop before that is a drop of something that comes back.
+func lastCreated(statements []string) map[string]int {
+	out := make(map[string]int)
+	for i, stmt := range statements {
+		if !keyword.HasPrefix(strings.TrimSpace(stmt), "CREATE") {
+			continue
+		}
+		if m := createRe.FindStringSubmatch(stmt); m != nil {
+			out[strings.ToLower(unqualify(m[1]))] = i
+		}
+	}
+	return out
+}
+
+// applyDrop removes a whole object.
+//
+// A file that creates a table and then drops it used to keep both, so the
+// output declared something the source no longer had, and a foreign key onto
+// the dropped table made the whole file fail to load.
+func applyDrop(schema *sqlmapper.Schema, action Action, name string) {
+	switch action {
+	case DropTable:
+		kept := schema.Tables[:0]
+		for _, t := range schema.Tables {
+			if !strings.EqualFold(t.Name, name) {
+				kept = append(kept, t)
+			}
+		}
+		schema.Tables = kept
+
+		// A key onto a table that no longer exists cannot be built, so it goes
+		// with it rather than being left to fail at load time.
+		for i := range schema.Tables {
+			constraints := schema.Tables[i].Constraints[:0]
+			for _, c := range schema.Tables[i].Constraints {
+				if !strings.EqualFold(c.RefTable, name) {
+					constraints = append(constraints, c)
+				}
+			}
+			schema.Tables[i].Constraints = constraints
+		}
+
+	case DropIndex:
+		for i := range schema.Tables {
+			indexes := schema.Tables[i].Indexes[:0]
+			for _, idx := range schema.Tables[i].Indexes {
+				if !strings.EqualFold(idx.Name, name) {
+					indexes = append(indexes, idx)
+				}
+			}
+			schema.Tables[i].Indexes = indexes
+		}
+
+	case DropView:
+		kept := schema.Views[:0]
+		for _, v := range schema.Views {
+			if !strings.EqualFold(v.Name, name) {
+				kept = append(kept, v)
+			}
+		}
+		schema.Views = kept
+
+	case DropSequence:
+		kept := schema.Sequences[:0]
+		for _, sq := range schema.Sequences {
+			if !strings.EqualFold(sq.Name, name) {
+				kept = append(kept, sq)
+			}
+		}
+		schema.Sequences = kept
+
+	case DropType:
+		kept := schema.Types[:0]
+		for _, ty := range schema.Types {
+			if !strings.EqualFold(ty.Name, name) {
+				kept = append(kept, ty)
+			}
+		}
+		schema.Types = kept
 	}
 }

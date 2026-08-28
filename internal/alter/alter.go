@@ -1,4 +1,5 @@
-// Package alter reads the ALTER statements a schema file carries.
+// Package alter reads the statements that change what a schema file's CREATE
+// statements built: ALTER, and DROP.
 //
 // A dump is not the only thing handed to this converter: a hand-written
 // migration is DDL too, and it states most of its schema in ALTER rather than
@@ -37,6 +38,14 @@ const (
 	RenameTable
 	ModifyColumn
 	DropConstraint
+
+	// The schema-level drops. A file that creates a table and then drops it
+	// kept both, so the output declared something the source no longer had.
+	DropTable
+	DropIndex
+	DropView
+	DropSequence
+	DropType
 )
 
 // Property names the single attribute a statement changes. PostgreSQL states
@@ -111,6 +120,13 @@ var (
 	// SQL Server has no RENAME of its own and scripts one as a stored procedure
 	// call, which is why it never looked like an ALTER at all.
 	spRenameRe = regexp.MustCompile(`(?is)^\s*EXEC(?:UTE)?\s+(?:sys\.)?sp_rename\s+\(?\s*'([^']+)'\s*,\s*'([^']+)'\s*(?:,\s*'([^']+)'\s*)?\)?\s*;?\s*$`)
+
+	// The schema-level drops. DROP INDEX names its table in MySQL and SQL
+	// Server and does not in PostgreSQL, Oracle or SQLite, so the table is
+	// optional and unused: an index name is unique enough within a schema for
+	// this to find it.
+	dropObjectRe = regexp.MustCompile(`(?is)^\s*DROP\s+(TABLE|INDEX|VIEW|MATERIALIZED\s+VIEW|SEQUENCE|TYPE)\s+(?:IF\s+EXISTS\s+)?([\[\]"` + "`" + `\w.]+)` +
+		`(?:\s+ON\s+[\[\]"` + "`" + `\w.]+)?\s*(?:CASCADE(?:\s+CONSTRAINTS)?|RESTRICT)?\s*;?\s*$`)
 )
 
 // Unquote strips whichever quoting a dialect put around a name. All three are
@@ -139,6 +155,10 @@ func Parse(stmt string) (Statement, bool) {
 	stmt = strings.TrimSpace(stmt)
 	if stmt == "" {
 		return Statement{}, false
+	}
+
+	if keyword.HasPrefix(stmt, "DROP") {
+		return parseDrop(stmt)
 	}
 
 	// The cheap check first. A schema file is mostly CREATE, and this runs once
@@ -191,6 +211,32 @@ func Parse(stmt string) (Statement, bool) {
 	}
 
 	return Statement{}, false
+}
+
+// parseDrop reads a statement that removes a whole object.
+func parseDrop(stmt string) (Statement, bool) {
+	m := dropObjectRe.FindStringSubmatch(stmt)
+	if m == nil {
+		return Statement{}, false
+	}
+
+	var action Action
+	switch strings.ToUpper(strings.Join(strings.Fields(m[1]), " ")) {
+	case "TABLE":
+		action = DropTable
+	case "INDEX":
+		action = DropIndex
+	case "VIEW", "MATERIALIZED VIEW":
+		action = DropView
+	case "SEQUENCE":
+		action = DropSequence
+	case "TYPE":
+		action = DropType
+	default:
+		return Statement{}, false
+	}
+
+	return Statement{Action: action, Names: []string{unqualify(m[2])}}, true
 }
 
 // fromModify reads the body of a MODIFY or ALTER COLUMN. PostgreSQL states one
@@ -286,7 +332,7 @@ func names(body string) []string {
 
 // mightApplyRe is the cheap gate in front of the replay: the keywords that
 // could start a statement this package acts on.
-var mightApplyRe = regexp.MustCompile(`(?i)\b(?:ALTER|SP_RENAME)\b`)
+var mightApplyRe = regexp.MustCompile(`(?i)\b(?:ALTER|DROP|SP_RENAME)\b`)
 
 // MightApply reports whether content holds anything the replay could act on.
 //

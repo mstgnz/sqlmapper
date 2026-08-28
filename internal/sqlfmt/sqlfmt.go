@@ -177,8 +177,15 @@ func PartialIndexNote(name, condition string, unique bool) string {
 // is: an Oracle OBJECT is not a PostgreSQL composite, and writing one into the
 // other produced "CREATE TYPE addr_t AS (OBJECT (...))", which does not load.
 // It is stated with its provenance rather than emitted broken.
-func ForeignType(source, name, definition string) string {
-	sql := fmt.Sprintf("CREATE TYPE %s AS %s;", name, definition)
+func ForeignType(source, name, kind, definition string) string {
+	// An alias names an existing type rather than describing a shape, and SQL
+	// Server writes it with FROM. Showing it with AS states a statement the
+	// source never wrote.
+	keyword := "AS"
+	if strings.EqualFold(kind, "ALIAS") {
+		keyword = "FROM"
+	}
+	sql := fmt.Sprintf("CREATE TYPE %s %s %s;", name, keyword, definition)
 	if source == "" {
 		source = "source"
 	}

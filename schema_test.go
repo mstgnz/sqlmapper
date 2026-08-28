@@ -308,3 +308,73 @@ func TestCommentStatementsCoversBothLevels(t *testing.T) {
 		t.Error("a table with no comments states none")
 	}
 }
+
+// TestResolveAliasTypes checks a column naming a SQL Server alias is rewritten
+// into the type the alias stands for. A target that cannot build an alias still
+// has to declare the column, and "mobile dbo.phone" names nothing there.
+func TestResolveAliasTypes(t *testing.T) {
+	schema := &Schema{
+		Types: []Type{
+			{Name: "phone", Schema: "dbo", Kind: "ALIAS", Definition: "VARCHAR(20) NOT NULL"},
+			{Name: "money2", Kind: "ALIAS", Definition: "DECIMAL(12,2)"},
+			{Name: "order_status", Kind: "ENUM", Definition: "'a', 'b'"},
+		},
+		Tables: []Table{{
+			Name: "contacts",
+			Columns: []Column{
+				{Name: "id", DataType: "int"},
+				{Name: "mobile", DataType: "dbo.phone", IsNullable: true},
+				{Name: "spare", DataType: "phone", IsNullable: true},
+				{Name: "amount", DataType: "money2"},
+				{Name: "status", DataType: "order_status"},
+			},
+		}},
+	}
+
+	got := ResolveAliasTypes(schema)
+
+	cols := map[string]Column{}
+	for _, c := range got.Tables[0].Columns {
+		cols[c.Name] = c
+	}
+	// The name and the size are separated, or the target's type map never sees
+	// the name and an alias over VARCHAR(20) reaches Oracle as VARCHAR, not
+	// VARCHAR2.
+	if cols["mobile"].DataType != "VARCHAR" || cols["mobile"].Length != 20 {
+		t.Errorf("mobile = %q(%d)", cols["mobile"].DataType, cols["mobile"].Length)
+	}
+	// The base carries its own nullability, which belongs to the column.
+	if cols["mobile"].IsNullable {
+		t.Error("the alias said NOT NULL")
+	}
+	// The alias resolves whether or not the column qualified it.
+	if cols["spare"].DataType != "VARCHAR" {
+		t.Errorf("spare = %q", cols["spare"].DataType)
+	}
+	if cols["amount"].DataType != "DECIMAL" || cols["amount"].Length != 12 || cols["amount"].Scale != 2 {
+		t.Errorf("amount = %q(%d,%d)", cols["amount"].DataType, cols["amount"].Length, cols["amount"].Scale)
+	}
+	// An enum is not an alias and is left where it is: the column names a type
+	// the target does declare.
+	if cols["status"].DataType != "order_status" {
+		t.Errorf("status = %q", cols["status"].DataType)
+	}
+
+	// Once the columns carry the base type there is nothing left for the alias
+	// to say, so it goes; the enum stays.
+	if len(got.Types) != 1 || got.Types[0].Kind != "ENUM" {
+		t.Errorf("types = %+v", got.Types)
+	}
+
+	// The original is untouched, or generating for two targets would have the
+	// first rewrite the schema under the second.
+	if schema.Tables[0].Columns[1].DataType != "dbo.phone" || len(schema.Types) != 3 {
+		t.Error("the input schema was modified in place")
+	}
+
+	// A schema with no alias is handed back as it stands.
+	plain := &Schema{Tables: []Table{{Name: "t"}}}
+	if ResolveAliasTypes(plain) != plain {
+		t.Error("a schema with no alias was copied for nothing")
+	}
+}
