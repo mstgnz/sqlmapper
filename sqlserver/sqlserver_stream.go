@@ -10,6 +10,7 @@ import (
 
 	"github.com/mstgnz/sqlmapper"
 	"github.com/mstgnz/sqlmapper/internal/keyword"
+	"github.com/mstgnz/sqlmapper/internal/sqlfmt"
 	"github.com/mstgnz/sqlmapper/stream"
 )
 
@@ -336,16 +337,18 @@ func (p *SQLServerStreamParser) GenerateStream(schema *sqlmapper.Schema, writer 
 		// Generate indexes for this table
 		for _, index := range table.Indexes {
 			stmt := p.sqlserver.generateIndexSQL(table.Name, index)
-			if _, err := writer.Write([]byte(stmt + "\nGO\n")); err != nil {
+			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\nGO\n")); err != nil {
 				return err
 			}
 		}
 	}
 
-	// Write views
+	// Views are rendered by the same code the file generator uses. SQL Server
+	// has no boolean, and the stream used to write a body saying WHERE is_active
+	// straight through, which does not load there.
 	for _, view := range schema.Views {
-		stmt := fmt.Sprintf("CREATE VIEW %s AS\n%s", view.Name, view.Definition)
-		if _, err := writer.Write([]byte(stmt + "\nGO\n\n")); err != nil {
+		stmt := p.sqlserver.generateViewSQL(view)
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\nGO\n\n")); err != nil {
 			return err
 		}
 	}

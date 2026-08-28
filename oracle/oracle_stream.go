@@ -566,9 +566,11 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		}
 	}
 
-	// Write views
+	// Views are rendered by the same code the file generator uses. Oracle has
+	// no boolean, and the stream used to write a body saying WHERE is_active
+	// straight through, which does not load there.
 	for _, view := range schema.Views {
-		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
+		stmt := p.oracle.generateViewSQL(view)
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}

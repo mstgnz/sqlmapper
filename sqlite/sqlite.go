@@ -509,8 +509,9 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Views are emitted after the tables they select from.
 	for _, view := range schema.Views {
-		body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLite)
-		fmt.Fprintf(s.buf, "\nCREATE VIEW %s AS %s;\n", view.Name, body)
+		s.buf.WriteString("\n")
+		s.buf.WriteString(s.generateViewSQL(view))
+		s.buf.WriteString(";\n")
 	}
 
 	// Routines come after everything they can refer to.
@@ -973,4 +974,14 @@ func singleColumnPK(table sqlmapper.Table) string {
 // the schema. Their names are reserved: SQLite refuses to create one.
 func isSQLiteInternalTable(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), "sqlite_")
+}
+
+// generateViewSQL renders a view definition, without its terminator.
+//
+// Both Generate and GenerateStream call it. The stream used to write the
+// definition as it stood, so a view carrying another dialect's schema qualifier
+// or a bare boolean column went out untranslated.
+func (s *SQLite) generateViewSQL(view sqlmapper.View) string {
+	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLite)
+	return fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, body)
 }

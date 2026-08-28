@@ -295,9 +295,10 @@ func (p *MySQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.W
 		}
 	}
 
-	// Write views
+	// Views are rendered by the same code the file generator uses, so a body
+	// carrying another dialect's schema qualifier is translated here too.
 	for _, view := range schema.Views {
-		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
+		stmt := p.mysql.generateViewSQL(view)
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}

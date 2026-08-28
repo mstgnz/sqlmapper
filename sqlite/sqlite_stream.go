@@ -272,9 +272,9 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 		}
 	}
 
-	// Write views
+	// Views are rendered by the same code the file generator uses.
 	for _, view := range schema.Views {
-		stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
+		stmt := p.sqlite.generateViewSQL(view)
 		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
 			return err
 		}

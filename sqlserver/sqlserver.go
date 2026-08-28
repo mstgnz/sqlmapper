@@ -925,8 +925,7 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Views are emitted last so the tables they select from already exist.
 	for _, view := range schema.Views {
-		body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLServer)
-		fmt.Fprintf(s.buf, "CREATE VIEW %s AS %s;\nGO\n", view.Name, body)
+		fmt.Fprintf(s.buf, "%s;\nGO\n", s.generateViewSQL(view))
 	}
 
 	// Routines come after everything they can refer to.
@@ -1333,4 +1332,14 @@ func mssParams(params []sqlmapper.Parameter) string {
 		parts = append(parts, "@"+strings.TrimPrefix(p.Name, "@")+" "+p.DataType)
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// generateViewSQL renders a view definition, without its terminator.
+//
+// Both Generate and GenerateStream call it. The stream used to write the
+// definition as it stood, and SQL Server has no boolean, so a view saying
+// WHERE is_active did not load there.
+func (s *SQLServer) generateViewSQL(view sqlmapper.View) string {
+	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLServer)
+	return fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, body)
 }

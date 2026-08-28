@@ -220,19 +220,9 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// its parent and the foreign key would fail to resolve.
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
-	// Emit CREATE TYPE for ENUM columns (MySQL ENUM -> PostgreSQL custom type)
-	for _, table := range tables {
-		for _, col := range table.Columns {
-			if strings.ToLower(col.DataType) == "enum" && len(col.EnumValues) > 0 {
-				typeName := fmt.Sprintf("%s_%s_enum", table.Name, col.Name)
-				quoted := make([]string, len(col.EnumValues))
-				for i, v := range col.EnumValues {
-					quoted[i] = fmt.Sprintf("'%s'", v)
-				}
-				result.WriteString(fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);\n",
-					typeName, strings.Join(quoted, ", ")))
-			}
-		}
+	for _, stmt := range p.enumTypesSQL(tables) {
+		result.WriteString(stmt)
+		result.WriteString("\n")
 	}
 
 	for _, table := range tables {
@@ -1634,4 +1624,28 @@ func (p *PostgreSQL) generateRoutinesSQL(schema *sqlmapper.Schema) string {
 		sb.WriteString("\n\n")
 	}
 	return sb.String()
+}
+
+// enumTypesSQL renders the CREATE TYPE a MySQL ENUM column needs, since
+// PostgreSQL has no inline enum.
+//
+// Both Generate and GenerateStream call it. The stream used to write none of
+// them, so a streamed MySQL schema produced tables referring to a type that was
+// never created.
+func (p *PostgreSQL) enumTypesSQL(tables []sqlmapper.Table) []string {
+	var out []string
+	for _, table := range tables {
+		for _, col := range table.Columns {
+			if !strings.EqualFold(col.DataType, "enum") || len(col.EnumValues) == 0 {
+				continue
+			}
+			quoted := make([]string, len(col.EnumValues))
+			for i, v := range col.EnumValues {
+				quoted[i] = fmt.Sprintf("'%s'", v)
+			}
+			out = append(out, fmt.Sprintf("CREATE TYPE %s_%s_enum AS ENUM (%s);",
+				table.Name, col.Name, strings.Join(quoted, ", ")))
+		}
+	}
+	return out
 }

@@ -167,3 +167,79 @@ GO
 CREATE VIEW [dbo].[active] AS SELECT id FROM dbo.users
 GO
 `
+
+// The two ways to write a schema have to produce the same SQL. They did not:
+// the stream wrote a view body as it stood, so another dialect's schema
+// qualifier survived and a bare boolean column reached Oracle and SQL Server,
+// which have no boolean and reject it. It also wrote no CREATE TYPE for a MySQL
+// ENUM column, leaving PostgreSQL tables referring to a type that never existed,
+// and an Oracle sequence with CACHE 1, which Oracle rejects outright.
+func TestGenerateAndGenerateStreamAgree(t *testing.T) {
+	sources := []struct {
+		name   string
+		dump   string
+		parser func() sqlmapper.Database
+	}{
+		{"mysql", mysqlEnumDump, mysql.NewMySQL},
+		{"postgres", postgresDump, postgres.NewPostgreSQL},
+		{"sqlite", sqliteDump, sqlite.NewSQLite},
+		{"oracle", oracleDump, oracle.NewOracle},
+		{"sqlserver", sqlserverDump, sqlserver.NewSQLServer},
+	}
+
+	targets := []struct {
+		name   string
+		file   func() sqlmapper.Database
+		stream func() stream.StreamParser
+	}{
+		{"mysql", mysql.NewMySQL, func() stream.StreamParser { return mysql.NewMySQLStreamParser() }},
+		{"postgres", postgres.NewPostgreSQL, func() stream.StreamParser { return postgres.NewPostgreSQLStreamParser() }},
+		{"sqlite", sqlite.NewSQLite, func() stream.StreamParser { return sqlite.NewSQLiteStreamParser() }},
+		{"oracle", oracle.NewOracle, func() stream.StreamParser { return oracle.NewOracleStreamParser() }},
+		{"sqlserver", sqlserver.NewSQLServer, func() stream.StreamParser { return sqlserver.NewSQLServerStreamParser() }},
+	}
+
+	for _, src := range sources {
+		schema, err := src.parser().Parse(src.dump)
+		require.NoError(t, err)
+
+		for _, target := range targets {
+			t.Run(src.name+"_to_"+target.name, func(t *testing.T) {
+				fileOut, err := target.file().Generate(schema)
+				require.NoError(t, err)
+
+				var streamOut strings.Builder
+				require.NoError(t, target.stream().GenerateStream(schema, &streamOut))
+
+				assert.Equal(t, sqlStatements(fileOut), sqlStatements(streamOut.String()))
+			})
+		}
+	}
+}
+
+// sqlStatements reduces generated SQL to its statements, so the two writers are
+// compared on what they emit rather than on how they space it.
+func sqlStatements(sql string) []string {
+	var out []string
+	for _, raw := range strings.Split(sql, ";") {
+		s := strings.Join(strings.Fields(raw), " ")
+		for _, sep := range []string{"GO", "/"} {
+			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), sep))
+			s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), sep))
+		}
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+const mysqlEnumDump = "CREATE TABLE `users` (\n" +
+	"  `id` bigint NOT NULL AUTO_INCREMENT,\n" +
+	"  `email` varchar(255) NOT NULL,\n" +
+	"  `status` enum('active','banned') NOT NULL DEFAULT 'active',\n" +
+	"  PRIMARY KEY (`id`),\n" +
+	"  UNIQUE KEY `uq_email` (`email`)\n" +
+	") ENGINE=InnoDB;\n" +
+	"CREATE VIEW `active` AS select `users`.`id` AS `id` from `users` where `users`.`id` > 0;\n"

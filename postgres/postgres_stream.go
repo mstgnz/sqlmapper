@@ -554,6 +554,14 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 		}
 	}
 
+	// A MySQL ENUM column needs a type of its own here, and the stream used to
+	// write none, so its tables referred to a type that was never created.
+	for _, stmt := range p.postgres.enumTypesSQL(schema.Tables) {
+		if _, err := writer.Write([]byte(stmt + "\n\n")); err != nil {
+			return err
+		}
+	}
+
 	// Write tables
 	// Order the tables the same way Generate does, so a streamed schema loads
 	// even when the source listed a child table before its parent.
@@ -583,18 +591,13 @@ func (p *PostgreSQLStreamParser) GenerateStream(schema *sqlmapper.Schema, writer
 		}
 	}
 
-	// Write views
+	// Views are rendered by the same code the file generator uses, so a body
+	// carrying another dialect's schema qualifier is translated here too.
+	booleans := p.postgres.booleanColumns(schema)
 	for _, view := range schema.Views {
-		if view.IsMaterialized {
-			stmt := fmt.Sprintf("CREATE MATERIALIZED VIEW %s AS %s", view.Name, view.Definition)
-			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
-				return err
-			}
-		} else {
-			stmt := fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, view.Definition)
-			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
-				return err
-			}
+		stmt := p.postgres.generateViewSQL(view, booleans)
+		if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n\n")); err != nil {
+			return err
 		}
 	}
 

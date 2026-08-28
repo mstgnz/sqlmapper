@@ -123,15 +123,17 @@ Nested blocks are the exception. A body whose inner block closes with its own
 `END;` ends the statement there, so a routine written that way is still cut
 short.
 
-## The same schema as Parse
+## The same output as Parse and Generate
 
 `ParseStream` and `Parse` read a dump with the same code and produce the same
 schema. Only the shape differs: the stream hands over one object at a time, and
 an index or a constraint the dump tool wrote as its own statement arrives on its
 own rather than attached to a table.
 
-`tests/integration/stream_agreement_test.go` holds the two side by side for
-every dialect, so a reader that drifts from the other fails the build.
+`GenerateStream` and `Generate` write the same SQL, statement for statement.
+
+`tests/integration/stream_agreement_test.go` holds both pairs side by side for
+every dialect, so one drifting from the other fails the build.
 
 ## Limitations
 

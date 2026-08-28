@@ -154,7 +154,7 @@ func TestOracleStreamParser_GenerateStreamFullSchema(t *testing.T) {
 	assert.Contains(t, got, "CREATE TYPE addr_t")
 	assert.Contains(t, got, "CREATE TABLE users")
 	assert.Contains(t, got, "idx_email")
-	assert.Contains(t, got, "CREATE VIEW v")
+	assert.Contains(t, got, "CREATE OR REPLACE VIEW v")
 }
 
 func TestOracleParseTableWithNestedCommas(t *testing.T) {

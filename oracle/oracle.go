@@ -713,10 +713,11 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	var result strings.Builder
 
-	// Create sequences
+	// Create sequences. The stream generator's renderer is used, which carries
+	// the bounds and the cache the shorter one here used to drop.
 	for _, seq := range schema.Sequences {
-		fmt.Fprintf(&result, "CREATE SEQUENCE %s START WITH %d INCREMENT BY %d;\n\n",
-			seq.Name, seq.StartValue, seq.IncrementBy)
+		result.WriteString(strings.TrimRight(o.generateSequenceSQL(seq), "\n"))
+		result.WriteString(";\n\n")
 	}
 
 	// Dump tools do not order tables by dependency, so a child table can precede
@@ -746,8 +747,8 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	// Create views
 	for _, view := range schema.Views {
-		fmt.Fprintf(&result, "CREATE OR REPLACE VIEW %s AS\n%s;\n\n",
-			view.Name, expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.Oracle))
+		result.WriteString(o.generateViewSQL(view))
+		result.WriteString(";\n\n")
 	}
 
 	// Routines come after everything they can refer to. This used to write
@@ -979,8 +980,14 @@ func (o *Oracle) generateSequenceSQL(sequence sqlmapper.Sequence) string {
 	if sequence.MaxValue > 0 {
 		sql += fmt.Sprintf("MAXVALUE %d\n", sequence.MaxValue)
 	}
-	if sequence.Cache > 0 {
+	// Oracle rejects a cache of one: ORA-04013 says the number has to be
+	// greater than 1. PostgreSQL writes CACHE 1 for a sequence with no cache at
+	// all, which is what NOCACHE means here.
+	switch {
+	case sequence.Cache > 1:
 		sql += fmt.Sprintf("CACHE %d\n", sequence.Cache)
+	case sequence.Cache == 1:
+		sql += "NOCACHE\n"
 	}
 	if sequence.Cycle {
 		sql += "CYCLE\n"
@@ -1451,4 +1458,14 @@ func oracleRoutineBody(body string) string {
 		return b
 	}
 	return "IS\n" + b
+}
+
+// generateViewSQL renders a view definition, without its terminator.
+//
+// Both Generate and GenerateStream call it. The stream used to write the
+// definition as it stood, and Oracle has no boolean, so a view saying
+// WHERE is_active did not load there.
+func (o *Oracle) generateViewSQL(view sqlmapper.View) string {
+	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.Oracle)
+	return fmt.Sprintf("CREATE OR REPLACE VIEW %s AS\n%s", view.Name, body)
 }
