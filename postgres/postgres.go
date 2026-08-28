@@ -113,7 +113,11 @@ var (
 	pgTableSpaceRe       = regexp.MustCompile(`(?i)TABLESPACE\s+(\w+)\s*$`)
 	pgIndexRe            = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(\w+)\s+ON\s+([\w.]+)\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)(?:\s+WHERE\s+(.+?))?(?:\s+TABLESPACE\s+(\w+))?\s*;`)
 	pgViewRe             = regexp.MustCompile(`(?i)CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+([\w.]+)\s+AS\s+(.*?);`)
-	pgMatViewRe          = regexp.MustCompile(`(?i)CREATE\s+MATERIALIZED\s+VIEW\s+([\w.]+)(?:\s+WITH\s*\([^)]*\))?\s+AS\s+(.*?)\s+WITH\s+(?:NO\s+)?DATA\s*;`)
+	// pg_dump ends a materialized view with WITH NO DATA and a hand-written one
+	// ends at the semicolon. Requiring the clause meant a materialized view that
+	// did not come from pg_dump was read as a plain view and written back as
+	// one, which is a different object: it stops holding its own rows.
+	pgMatViewRe = regexp.MustCompile(`(?i)CREATE\s+MATERIALIZED\s+VIEW\s+([\w.]+)(?:\s+WITH\s*\([^)]*\))?\s+AS\s+(.*?)(?:\s+WITH\s+(?:NO\s+)?DATA)?\s*;`)
 	// pg_dump writes the attributes between RETURNS and the body:
 	//
 	//	CREATE FUNCTION public.touch() RETURNS trigger
@@ -302,6 +306,17 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 
 	for _, stmt := range p.enumTypesSQL(tables) {
 		result.WriteString(stmt)
+		result.WriteString("\n")
+	}
+
+	// Sequences come before the tables: a column default may name one. Only the
+	// ones no serial column creates for itself are written.
+	backed := serialBackedSequences(schema)
+	for _, seq := range schema.Sequences {
+		if backed[strings.ToLower(seq.Name)] {
+			continue
+		}
+		result.WriteString(p.generateSequenceSQL(seq))
 		result.WriteString("\n")
 	}
 
@@ -1522,6 +1537,13 @@ func (p *PostgreSQL) booleanColumns(schema *sqlmapper.Schema) map[string]bool {
 }
 
 func (p *PostgreSQL) resolveType(col sqlmapper.Column, tableName string) string {
+	// MySQL is the only one of the five with an unsigned integer, so a column
+	// that used it needs the wider type here or it silently rejects the top half
+	// of its own range.
+	if col.IsUnsigned {
+		col = widenedCopy(col)
+	}
+
 	lower := strings.ToLower(col.DataType)
 
 	// ENUM with values → use the custom type we declared
@@ -1671,6 +1693,57 @@ func splitStatements(content string) []string {
 			out = append(out, stmt)
 		}
 	}
+}
+
+// generateSequenceSQL renders a sequence.
+//
+// Nothing wrote these. PostgreSQL read three of them out of its own dump and
+// emitted none, so a sequence that no column backs, the one an application
+// draws ticket numbers from, disappeared on a conversion from PostgreSQL to
+// PostgreSQL. The two that back a serial column came back because the column
+// declares its own, which is what hid this.
+func (p *PostgreSQL) generateSequenceSQL(seq sqlmapper.Sequence) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "CREATE SEQUENCE %s", seq.Name)
+	if seq.IncrementBy > 0 {
+		fmt.Fprintf(&sb, " INCREMENT BY %d", seq.IncrementBy)
+	}
+	if seq.MinValue > 0 {
+		fmt.Fprintf(&sb, " MINVALUE %d", seq.MinValue)
+	}
+	if seq.MaxValue > 0 {
+		fmt.Fprintf(&sb, " MAXVALUE %d", seq.MaxValue)
+	}
+	if seq.StartValue > 0 {
+		fmt.Fprintf(&sb, " START WITH %d", seq.StartValue)
+	}
+	// PostgreSQL writes CACHE 1 for a sequence with no cache at all, which is
+	// how the schema carries the other dialects' NOCACHE.
+	if seq.Cache > 0 {
+		fmt.Fprintf(&sb, " CACHE %d", seq.Cache)
+	}
+	if seq.Cycle {
+		sb.WriteString(" CYCLE")
+	}
+	sb.WriteString(";")
+	return sb.String()
+}
+
+// serialBackedSequences names the sequences a serial column already creates.
+//
+// A column declared BIGSERIAL creates its own sequence, so writing it again is
+// "relation already exists". pg_dump states both, which is why the schema holds
+// both, and only the ones no column backs are written here.
+func serialBackedSequences(schema *sqlmapper.Schema) map[string]bool {
+	out := make(map[string]bool)
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if col.AutoIncrement {
+				out[strings.ToLower(fmt.Sprintf("%s_%s_seq", table.Name, col.Name))] = true
+			}
+		}
+	}
+	return out
 }
 
 // generateTypeSQL generates SQL for a PostgreSQL type definition.
@@ -1902,4 +1975,33 @@ func pgParameter(param string) (sqlmapper.Parameter, bool) {
 		Direction: direction,
 		DataType:  strings.Join(fields[1:], " "),
 	}, true
+}
+
+// widenedCopy returns the column with its type widened to hold what an unsigned
+// one held. The copy matters: the caller's schema is shared with whatever
+// generates next.
+func widenedCopy(col sqlmapper.Column) sqlmapper.Column {
+	// An auto-increment column is never widened. The target carries it as its own
+	// serial or identity type, which has no unsigned form anywhere, and widening
+	// it to a decimal takes the identity with it: a bigint unsigned
+	// AUTO_INCREMENT came out as NUMERIC(20) instead of BIGSERIAL. A counter
+	// that starts at one does not reach the half of the range this would buy.
+	if col.AutoIncrement {
+		return col
+	}
+
+	widened := sqlmapper.UnsignedWidened(col.DataType)
+	if widened == col.DataType {
+		return col
+	}
+	col.DataType = widened
+	// An unsigned bigint becomes a decimal wide enough for it, which needs a
+	// precision the integer never carried.
+	if widened == "numeric" {
+		col.Length, col.Scale = 20, 0
+	} else {
+		col.Length = 0
+	}
+	col.IsUnsigned = false
+	return col
 }

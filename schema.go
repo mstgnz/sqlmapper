@@ -122,6 +122,30 @@ type Comment struct {
 	Comment string
 }
 
+// UnsignedWidened names the type that holds an unsigned column's range on a
+// target that has no unsigned.
+//
+// MySQL is the only one of the five with the keyword. An unsigned int holds up
+// to 4294967295 and a signed one half that, so mapping it straight across
+// leaves a column that silently rejects the top half of its own range. The
+// narrowest type that holds all of it is used instead.
+//
+// An unsigned bigint runs past a signed bigint, so it widens to a decimal. That
+// is a real change of type and the only alternative is losing values.
+func UnsignedWidened(dataType string) string {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "tinyint":
+		return "smallint"
+	case "smallint":
+		return "integer"
+	case "mediumint", "int", "integer":
+		return "bigint"
+	case "bigint":
+		return "numeric"
+	}
+	return dataType
+}
+
 // ResolveAliasTypes rewrites the columns that name an alias type into the type
 // the alias stands for.
 //

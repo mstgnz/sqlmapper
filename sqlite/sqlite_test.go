@@ -338,3 +338,35 @@ func TestSQLiteGeneratedColumn(t *testing.T) {
 	assert.Contains(t, out, "b GENERATED ALWAYS AS (a * 2) STORED")
 	assert.NotContains(t, out, "b  ")
 }
+
+// TestSQLiteUnsignedAndSequenceNotes covers the two things SQLite has no form
+// for: an unsigned integer, whose range has to be kept by widening, and a
+// sequence, which is stated rather than dropped without a word.
+func TestSQLiteUnsignedAndSequenceNotes(t *testing.T) {
+	schema := &sqlmapper.Schema{
+		Sequences: []sqlmapper.Sequence{
+			{Name: "ticket_seq", StartValue: 100, IncrementBy: 5},
+			{Name: "users_id_seq", StartValue: 1, IncrementBy: 1},
+		},
+		Tables: []sqlmapper.Table{{
+			Name: "users",
+			Columns: []sqlmapper.Column{
+				{Name: "id", DataType: "int", AutoIncrement: true},
+				{Name: "small", DataType: "tinyint", IsUnsigned: true},
+				{Name: "big", DataType: "bigint", IsUnsigned: true},
+			},
+		}},
+	}
+
+	out, err := NewSQLite().Generate(schema)
+	require.NoError(t, err)
+
+	// SQLite has one integer class, so widening a small unsigned changes
+	// nothing; a bigint unsigned runs past a signed one and becomes a decimal.
+	assert.Contains(t, out, "small INTEGER")
+	assert.Contains(t, out, "big NUMERIC(20)")
+
+	assert.Contains(t, out, "-- not carried, SQLite has no sequence: ticket_seq (start 100, increment 5)")
+	// The one the auto-increment column carries is already accounted for.
+	assert.NotContains(t, out, "users_id_seq")
+}

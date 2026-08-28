@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/mstgnz/sqlmapper"
+	"github.com/mstgnz/sqlmapper/stream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMySQL_Parse(t *testing.T) {
@@ -351,4 +353,62 @@ func columnComment(table sqlmapper.Table, name string) string {
 		}
 	}
 	return ""
+}
+
+// TestMySQLUnsignedAndSequenceNotes covers the two things MySQL states that the
+// model carried and the generator did not: the UNSIGNED keyword, which was read
+// and thrown away, and a sequence, which MySQL cannot hold at all.
+func TestMySQLUnsignedAndSequenceNotes(t *testing.T) {
+	schema, err := NewMySQL().Parse(
+		"CREATE TABLE t (a tinyint unsigned, b decimal(10,2) unsigned, c int, d varchar(20));")
+	require.NoError(t, err)
+
+	out, err := NewMySQL().Generate(schema)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "a TINYINT UNSIGNED")
+	// MySQL 8.0 deprecated UNSIGNED on the decimal types, so it is written on
+	// the integers only.
+	assert.NotContains(t, out, "DECIMAL(10,2) UNSIGNED")
+	assert.NotContains(t, out, "c INT UNSIGNED")
+
+	// A sequence has no MySQL form. The one a serial column carries is already
+	// accounted for by the column; the rest are stated rather than dropped.
+	withSeq := &sqlmapper.Schema{
+		Sequences: []sqlmapper.Sequence{
+			{Name: "ticket_seq", StartValue: 100, IncrementBy: 5},
+			{Name: "users_id_seq", StartValue: 1, IncrementBy: 1},
+		},
+		Tables: []sqlmapper.Table{{
+			Name:    "users",
+			Columns: []sqlmapper.Column{{Name: "id", DataType: "int", AutoIncrement: true}},
+		}},
+	}
+	out, err = NewMySQL().Generate(withSeq)
+	require.NoError(t, err)
+	assert.Contains(t, out, "-- not carried, MySQL has no sequence: ticket_seq (start 100, increment 5)")
+	assert.NotContains(t, out, "users_id_seq")
+}
+
+// TestMySQLStreamReadsAStandaloneIndex pins the reader the stream did not have.
+// A dump whose indexes are written as statements of their own lost every one of
+// them on this path, while the same file read whole kept them.
+func TestMySQLStreamReadsAStandaloneIndex(t *testing.T) {
+	const script = "CREATE TABLE t (id int, email varchar(50));\n" +
+		"CREATE UNIQUE INDEX uq_email ON t (email);\n" +
+		"CREATE INDEX ix_id ON t (id);\n"
+
+	var indexes []sqlmapper.Index
+	require.NoError(t, NewMySQLStreamParser().ParseStream(strings.NewReader(script), func(obj stream.SchemaObject) error {
+		if obj.Type == stream.IndexObject {
+			indexes = append(indexes, *obj.Data.(*sqlmapper.Index))
+		}
+		return nil
+	}))
+
+	require.Len(t, indexes, 2)
+	assert.Equal(t, "uq_email", indexes[0].Name)
+	assert.True(t, indexes[0].IsUnique)
+	assert.Equal(t, []string{"email"}, indexes[0].Columns)
+	assert.False(t, indexes[1].IsUnique)
 }

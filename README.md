@@ -282,6 +282,20 @@ have none: the index widens into a full one and the dropped filter is written
 above it as a comment, because a conditional unique index that silently becomes
 unconditional starts rejecting rows that were legal before.
 
+MySQL is the only one of the five with an unsigned integer. It is written back
+there, and on the other four the column takes the narrowest type that still
+holds its range: an unsigned `int` becomes a `bigint`, an unsigned `bigint`
+becomes a decimal. Mapping it straight across left a column that silently
+rejected the top half of its own range. An auto-increment column is the
+exception and is never widened, because the target carries it as its own serial
+or identity type and there is no unsigned form of one.
+
+Sequences are written by the three dialects that have them. PostgreSQL used to
+read three out of its own dump and write none: the two behind a serial column
+came back because the column declares its own, which is what hid the third, an
+application's ticket counter, going missing. MySQL and SQLite have no sequence
+and state the ones they cannot hold.
+
 Computed columns travel too. Each dialect spells the clause its own way and not
 all of them offer the choice of where the value lives: PostgreSQL only stores
 it, Oracle only computes it on read, and SQL Server writes `PERSISTED` rather

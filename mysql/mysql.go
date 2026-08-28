@@ -363,6 +363,17 @@ func (m *MySQL) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(routines)
 	}
 
+	// Neither MySQL nor SQLite has a sequence. A serial column carries its own
+	// counter, so the sequences that back one are already accounted for; the
+	// rest are stated rather than dropped without a word.
+	for _, seq := range schema.Sequences {
+		if backedByAColumn(schema, seq.Name) {
+			continue
+		}
+		fmt.Fprintf(&result, "\n-- not carried, MySQL has no sequence: %s (start %d, increment %d)\n",
+			seq.Name, seq.StartValue, seq.IncrementBy)
+	}
+
 	// Grants come last: they name tables, views and routines, all of which have
 	// to exist before the grant is read.
 	if perms := m.generatePermissionsSQL(schema); perms != "" {
@@ -1123,6 +1134,11 @@ func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK, hasUnique b
 	parts = append(parts, column.Name)
 
 	mysqlType := m.resolveType(column)
+	// UNSIGNED was read and never written, so a MySQL column holding values up
+	// to 4294967295 came back holding half that and rejecting the rest.
+	if column.IsUnsigned && mysqlIsIntegerType(mysqlType) {
+		mysqlType += " UNSIGNED"
+	}
 	parts = append(parts, mysqlType)
 
 	// A computed column states what it computes and nothing else: no default,
@@ -1494,4 +1510,36 @@ func mysqlComments(content string) (tables map[string]string, columns map[string
 		}
 	}
 	return tables, columns
+}
+
+// backedByAColumn reports whether an auto-increment column already carries the
+// sequence's counter, which is how PostgreSQL states a serial: the sequence and
+// the column are two halves of one thing, and only the column survives here.
+func backedByAColumn(schema *sqlmapper.Schema, name string) bool {
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if !col.AutoIncrement {
+				continue
+			}
+			if strings.EqualFold(name, fmt.Sprintf("%s_%s_seq", table.Name, col.Name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mysqlIsIntegerType reports whether a rendered type takes UNSIGNED. MySQL
+// accepts it on the numeric types only, and 8.0 deprecated it on the decimal
+// ones, so it is written on the integers.
+func mysqlIsIntegerType(rendered string) bool {
+	name := rendered
+	if i := strings.IndexByte(name, '('); i != -1 {
+		name = name[:i]
+	}
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT":
+		return true
+	}
+	return false
 }

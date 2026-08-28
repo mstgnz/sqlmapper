@@ -616,6 +616,17 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 		s.buf.WriteString(routines)
 	}
 
+	// Neither MySQL nor SQLite has a sequence. A serial column carries its own
+	// counter, so the sequences that back one are already accounted for; the
+	// rest are stated rather than dropped without a word.
+	for _, seq := range schema.Sequences {
+		if backedByAColumn(schema, seq.Name) {
+			continue
+		}
+		fmt.Fprintf(s.buf, "\n-- not carried, SQLite has no sequence: %s (start %d, increment %d)\n",
+			seq.Name, seq.StartValue, seq.IncrementBy)
+	}
+
 	if perms := s.generatePermissionsSQL(schema); perms != "" {
 		s.buf.WriteString("\n")
 		s.buf.WriteString(perms)
@@ -925,6 +936,13 @@ var toSQLiteType = map[string]string{
 
 // sqliteColumnType renders a column's type, with the precision that survives.
 func sqliteColumnType(col sqlmapper.Column) string {
+	// MySQL is the only one of the five with an unsigned integer, so a column
+	// that used it needs the wider type here or it silently rejects the top half
+	// of its own range.
+	if col.IsUnsigned {
+		col = widenedCopy(col)
+	}
+
 	// An array has no SQLite equivalent, so it travels as text the way it does
 	// on the way to MySQL.
 	if col.IsArray {
@@ -1108,3 +1126,49 @@ var sqliteInlineFKRe = regexp.MustCompile(`(?is)\bREFERENCES\s+([` + "`" + `"\[\
 
 // sqliteColumnCheckRe captures the body of a CHECK written on a column.
 var sqliteColumnCheckRe = regexp.MustCompile(`(?is)\bCHECK\s*\(((?:[^()]|\([^()]*\))*)\)`)
+
+// backedByAColumn reports whether an auto-increment column already carries the
+// sequence's counter, which is how PostgreSQL states a serial: the sequence and
+// the column are two halves of one thing, and only the column survives here.
+func backedByAColumn(schema *sqlmapper.Schema, name string) bool {
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if !col.AutoIncrement {
+				continue
+			}
+			if strings.EqualFold(name, fmt.Sprintf("%s_%s_seq", table.Name, col.Name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// widenedCopy returns the column with its type widened to hold what an unsigned
+// one held. The copy matters: the caller's schema is shared with whatever
+// generates next.
+func widenedCopy(col sqlmapper.Column) sqlmapper.Column {
+	// An auto-increment column is never widened. The target carries it as its own
+	// serial or identity type, which has no unsigned form anywhere, and widening
+	// it to a decimal takes the identity with it: a bigint unsigned
+	// AUTO_INCREMENT came out as NUMERIC(20) instead of BIGSERIAL. A counter
+	// that starts at one does not reach the half of the range this would buy.
+	if col.AutoIncrement {
+		return col
+	}
+
+	widened := sqlmapper.UnsignedWidened(col.DataType)
+	if widened == col.DataType {
+		return col
+	}
+	col.DataType = widened
+	// An unsigned bigint becomes a decimal wide enough for it, which needs a
+	// precision the integer never carried.
+	if widened == "numeric" {
+		col.Length, col.Scale = 20, 0
+	} else {
+		col.Length = 0
+	}
+	col.IsUnsigned = false
+	return col
+}

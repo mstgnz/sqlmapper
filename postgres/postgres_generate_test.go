@@ -644,3 +644,77 @@ func TestPostgreSQLStreamParser_GenerateStreamOrdersTables(t *testing.T) {
 	got := out.String()
 	assert.Less(t, strings.Index(got, "CREATE TABLE users"), strings.Index(got, "CREATE TABLE orders"))
 }
+
+// TestPostgresGeneratesSequences pins the object PostgreSQL read out of its own
+// dump and wrote none of. The two behind a serial column came back because the
+// column declares its own, which is what hid the third going missing.
+func TestPostgresGeneratesSequences(t *testing.T) {
+	schema := &sqlmapper.Schema{
+		Sequences: []sqlmapper.Sequence{
+			{Name: "ticket_seq", StartValue: 100, IncrementBy: 5, MinValue: 1, MaxValue: 999, Cache: 20, Cycle: true},
+			{Name: "orders_id_seq", StartValue: 1, IncrementBy: 1},
+			{Name: "bare_seq"},
+		},
+		Tables: []sqlmapper.Table{{
+			Name:    "orders",
+			Columns: []sqlmapper.Column{{Name: "id", DataType: "integer", AutoIncrement: true}},
+		}},
+	}
+
+	out, err := NewPostgreSQL().Generate(schema)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "CREATE SEQUENCE ticket_seq INCREMENT BY 5 MINVALUE 1 MAXVALUE 999 START WITH 100 CACHE 20 CYCLE;")
+	// A sequence with no options at all is still a sequence.
+	assert.Contains(t, out, "CREATE SEQUENCE bare_seq;")
+	// The one a serial column creates for itself is not written twice: that is
+	// "relation already exists".
+	assert.NotContains(t, out, "CREATE SEQUENCE orders_id_seq")
+}
+
+// TestPostgresPermissions covers the grant forms, which nothing wrote at all
+// until they were added.
+func TestPostgresPermissions(t *testing.T) {
+	out, err := NewPostgreSQL().Generate(&sqlmapper.Schema{
+		Tables: []sqlmapper.Table{{Name: "t", Columns: []sqlmapper.Column{{Name: "id", DataType: "integer"}}}},
+		Permissions: []sqlmapper.Permission{
+			{Type: "GRANT", Privileges: []string{"SELECT", "INSERT"}, Object: "public.t", Grantee: "reporting"},
+			{Type: "GRANT", Privileges: nil, Object: "t", Grantee: "admin", WithGrant: true},
+			{Type: "REVOKE", Privileges: []string{"DELETE"}, Object: "t", Grantee: "reporting"},
+			{Type: "GRANT", Privileges: []string{"SELECT"}, Object: "", Grantee: "nobody"},
+			{Type: "GRANT", Privileges: []string{"SELECT"}, Object: "t", Grantee: ""},
+		},
+	})
+	require.NoError(t, err)
+
+	// The schema qualifier does not survive the hop: the table is written bare.
+	assert.Contains(t, out, "GRANT SELECT, INSERT ON t TO reporting;")
+	// An empty privilege list would render "GRANT  ON t", which no dialect
+	// accepts, so it falls back to the widest.
+	assert.Contains(t, out, "GRANT ALL PRIVILEGES ON t TO admin WITH GRANT OPTION;")
+	assert.Contains(t, out, "REVOKE DELETE ON t FROM reporting;")
+	assert.NotContains(t, out, "TO nobody")
+}
+
+// TestPostgresWidensUnsigned checks the column keeps its range. MySQL is the
+// only one of the five with an unsigned integer.
+func TestPostgresWidensUnsigned(t *testing.T) {
+	p := NewPostgreSQL().(*PostgreSQL)
+
+	for from, want := range map[string]string{
+		"tinyint": "SMALLINT", "smallint": "INTEGER",
+		"int": "BIGINT", "bigint": "NUMERIC(20)",
+	} {
+		got := p.resolveType(sqlmapper.Column{Name: "c", DataType: from, IsUnsigned: true}, "t")
+		assert.Equal(t, want, strings.ToUpper(got), "unsigned %s", from)
+	}
+
+	// A signed column is untouched, and so is a type with no wider form.
+	assert.Equal(t, "INTEGER", strings.ToUpper(p.resolveType(sqlmapper.Column{DataType: "int"}, "t")))
+	assert.Equal(t, "TEXT", strings.ToUpper(p.resolveType(sqlmapper.Column{DataType: "text", IsUnsigned: true}, "t")))
+
+	// An auto-increment column keeps its identity rather than being widened out
+	// of it: BIGSERIAL, not NUMERIC(20).
+	serial := p.resolveType(sqlmapper.Column{DataType: "bigint", IsUnsigned: true, AutoIncrement: true}, "t")
+	assert.Equal(t, "BIGSERIAL", strings.ToUpper(serial))
+}

@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mstgnz/sqlmapper"
@@ -67,7 +68,12 @@ func TestConversionReachesAFixedPoint(t *testing.T) {
 				second, err := mk().Generate(reparsed)
 				require.NoError(t, err)
 
-				assert.Equal(t, first, second)
+				// The provenance notes are compared away. A "not carried" line
+				// states something the target could not hold, so it appears on
+				// the first conversion and not on the second: by then the object
+				// it describes is no longer in the schema to be missed. That is
+				// the note doing its job, not the schema failing to converge.
+				assert.Equal(t, withoutNotes(first), withoutNotes(second))
 			})
 		}
 	}
@@ -235,4 +241,21 @@ func TestDefaultsAgreeAcrossDialects(t *testing.T) {
 			assert.NotContains(t, out, "DEFAULT", "%s wrote a default for NULL", name)
 		}
 	})
+}
+
+// withoutNotes drops the provenance comments from generated SQL, which are
+// annotations rather than schema: they say what the target could not hold.
+func withoutNotes(sql string) string {
+	var kept []string
+	for _, line := range strings.Split(sql, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "-- not carried") ||
+			strings.Contains(trimmed, "was partial in the source") ||
+			strings.Contains(trimmed, "states no type for it") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	// The trailing blank a removed note leaves behind is not schema either.
+	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
 }

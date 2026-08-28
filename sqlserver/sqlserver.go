@@ -440,6 +440,13 @@ func (s *SQLServer) resolveType(col sqlmapper.Column) string {
 // resolveTypeForKey renders a column's type, bounding an unbounded text column
 // when the table indexes it.
 func (s *SQLServer) resolveTypeForKey(col sqlmapper.Column, isKey bool) string {
+	// MySQL is the only one of the five with an unsigned integer, so a column
+	// that used it needs the wider type here or it silently rejects the top half
+	// of its own range.
+	if col.IsUnsigned {
+		col = widenedCopy(col)
+	}
+
 	rendered := s.resolveTypeName(col)
 	if isKey && col.Length == 0 && sqlServerUnboundedText[strings.ToUpper(rendered)] {
 		return sqlServerKeyTextType
@@ -1756,4 +1763,33 @@ func mssExtendedProperty(c sqlmapper.Comment) string {
 	}
 	sb.WriteString(";\nGO\n")
 	return sb.String()
+}
+
+// widenedCopy returns the column with its type widened to hold what an unsigned
+// one held. The copy matters: the caller's schema is shared with whatever
+// generates next.
+func widenedCopy(col sqlmapper.Column) sqlmapper.Column {
+	// An auto-increment column is never widened. The target carries it as its own
+	// serial or identity type, which has no unsigned form anywhere, and widening
+	// it to a decimal takes the identity with it: a bigint unsigned
+	// AUTO_INCREMENT came out as NUMERIC(20) instead of BIGSERIAL. A counter
+	// that starts at one does not reach the half of the range this would buy.
+	if col.AutoIncrement {
+		return col
+	}
+
+	widened := sqlmapper.UnsignedWidened(col.DataType)
+	if widened == col.DataType {
+		return col
+	}
+	col.DataType = widened
+	// An unsigned bigint becomes a decimal wide enough for it, which needs a
+	// precision the integer never carried.
+	if widened == "numeric" {
+		col.Length, col.Scale = 20, 0
+	} else {
+		col.Length = 0
+	}
+	col.IsUnsigned = false
+	return col
 }
