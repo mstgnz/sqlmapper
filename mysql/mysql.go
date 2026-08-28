@@ -996,7 +996,14 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 		result.WriteString("\n")
 	}
 
-	result.WriteString(");")
+	result.WriteString(")")
+
+	// MySQL states a table comment in the options rather than in a statement of
+	// its own, which is also where it reads one from.
+	if table.Comment != "" {
+		result.WriteString(" COMMENT='" + strings.ReplaceAll(table.Comment, "'", "''") + "'")
+	}
+	result.WriteString(";")
 	return result.String()
 }
 
@@ -1028,6 +1035,11 @@ func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK, hasUnique b
 	// here. The table-level constraint carries it instead.
 	if column.IsUnique && !inlinePK && !hasUnique && !unboundedKeyTypes[mysqlBaseType(mysqlType)] {
 		parts = append(parts, "UNIQUE")
+	}
+
+	// A column comment goes on the column, which is where MySQL writes one.
+	if column.Comment != "" {
+		parts = append(parts, "COMMENT '"+strings.ReplaceAll(column.Comment, "'", "''")+"'")
 	}
 
 	return strings.Join(parts, " ")

@@ -218,6 +218,9 @@ func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
 			}
 			s.schema.Triggers = append(s.schema.Triggers, trigger)
 
+		case mssExtendedPropertyRe.Match(stmt):
+			s.applyExtendedProperty(string(stmt))
+
 		// Functions and procedures were read by the stream parser only, so a
 		// script converted through this path lost them without a word.
 		case bytes.HasPrefix(upperStmt, []byte("CREATE FUNCTION")),
@@ -941,6 +944,14 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 		fmt.Fprintf(s.buf, "%s;\nGO\n", s.generateViewSQL(view))
 	}
 
+	// SQL Server keeps a comment in an extended property, which is a call rather
+	// than a statement.
+	for _, table := range tables {
+		for _, c := range sqlmapper.CommentStatements(table) {
+			s.buf.WriteString(mssExtendedProperty(c))
+		}
+	}
+
 	// Routines come after everything they can refer to.
 	if routines := s.generateRoutinesSQL(schema); routines != "" {
 		s.buf.WriteString("\n")
@@ -1350,4 +1361,82 @@ func mssReferentialAction(rule string) string {
 		return "SET DEFAULT"
 	}
 	return ""
+}
+
+// SQL Server keeps a comment in an extended property rather than in the DDL,
+// and SSMS scripts it as a call:
+//
+//	EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'...',
+//	    @level0type=N'SCHEMA', @level0name=N'dbo',
+//	    @level1type=N'TABLE',  @level1name=N'customers',
+//	    @level2type=N'COLUMN', @level2name=N'email';
+//
+// Nothing read those, so a commented SQL Server schema arrived with none of them
+// while the other four dialects kept theirs.
+var (
+	mssExtendedPropertyRe = regexp.MustCompile(`(?is)^\s*EXEC(?:UTE)?\s+(?:sys\.)?sp_addextendedproperty\b`)
+	mssPropertyArgRe      = regexp.MustCompile(`(?is)@(\w+)\s*=\s*N?'((?:[^']|'')*)'`)
+)
+
+// applyExtendedProperty records a description stated on a table or a column.
+func (s *SQLServer) applyExtendedProperty(stmt string) {
+	args := map[string]string{}
+	for _, m := range mssPropertyArgRe.FindAllStringSubmatch(stmt, -1) {
+		args[strings.ToLower(m[1])] = strings.ReplaceAll(m[2], "''", "'")
+	}
+
+	if !strings.EqualFold(args["name"], "MS_Description") {
+		return
+	}
+	if !strings.EqualFold(args["level1type"], "TABLE") {
+		return
+	}
+
+	table := s.findTable(args["level1name"])
+	if table == nil {
+		return
+	}
+
+	if strings.EqualFold(args["level2type"], "COLUMN") {
+		for i := range table.Columns {
+			if strings.EqualFold(table.Columns[i].Name, args["level2name"]) {
+				table.Columns[i].Comment = args["value"]
+				return
+			}
+		}
+		return
+	}
+
+	table.Comment = args["value"]
+}
+
+// findTable returns the table by name, or nil when the script has not declared
+// it yet.
+func (s *SQLServer) findTable(name string) *sqlmapper.Table {
+	name = splitBracketedName(name)
+	for i := range s.schema.Tables {
+		if strings.EqualFold(s.schema.Tables[i].Name, name) {
+			return &s.schema.Tables[i]
+		}
+	}
+	return nil
+}
+
+// mssExtendedProperty renders a comment the way SQL Server stores one.
+func mssExtendedProperty(c sqlmapper.Comment) string {
+	table, column := c.Name, ""
+	if i := strings.LastIndex(c.Name, "."); i != -1 && c.Object == "COLUMN" {
+		table, column = c.Name[:i], c.Name[i+1:]
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'%s',\n",
+		strings.ReplaceAll(c.Comment, "'", "''"))
+	fmt.Fprintf(&sb, "    @level0type=N'SCHEMA', @level0name=N'dbo',\n")
+	fmt.Fprintf(&sb, "    @level1type=N'TABLE', @level1name=N'%s'", table)
+	if column != "" {
+		fmt.Fprintf(&sb, ",\n    @level2type=N'COLUMN', @level2name=N'%s'", column)
+	}
+	sb.WriteString(";\nGO\n")
+	return sb.String()
 }

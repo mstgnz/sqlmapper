@@ -538,6 +538,12 @@ func (s *SQLite) Generate(schema *sqlmapper.Schema) (string, error) {
 	tables, deferredFKs := sqlmapper.OrderTablesByDependency(schema.Tables)
 
 	for i, table := range tables {
+		// SQLite has nowhere to put a comment, so what the source wrote is kept
+		// as a comment on the file rather than dropped without trace.
+		for _, c := range sqlmapper.CommentStatements(table) {
+			fmt.Fprintf(s.buf, "-- %s %s: %s\n", strings.ToLower(c.Object), c.Name, c.Comment)
+		}
+
 		s.buf.WriteString(s.generateTableSQL(table, deferredFKs[table.Name]))
 		s.buf.WriteString(";\n")
 

@@ -133,3 +133,15 @@ func TestUnquoteLiteral(t *testing.T) {
 		}
 	}
 }
+
+func TestCommentOn(t *testing.T) {
+	if got := CommentOn("TABLE", "users", "people who buy things"); got != "COMMENT ON TABLE users IS 'people who buy things';" {
+		t.Errorf("got %q", got)
+	}
+	if got := CommentOn("COLUMN", "users.email", "it's unique"); got != "COMMENT ON COLUMN users.email IS 'it''s unique';" {
+		t.Errorf("got %q", got)
+	}
+	if got := CommentOn("TABLE", "users", ""); got != "" {
+		t.Errorf("no comment means no statement, got %q", got)
+	}
+}

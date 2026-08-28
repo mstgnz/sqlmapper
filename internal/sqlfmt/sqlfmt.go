@@ -135,3 +135,16 @@ func UnquoteLiteral(v string) string {
 	}
 	return strings.ReplaceAll(v[1:len(v)-1], "''", "'")
 }
+
+// CommentOn renders the COMMENT ON statements PostgreSQL and Oracle use.
+//
+// A comment is documentation the author wrote, and every parser here reads one
+// while no generator wrote one, so it was carried into the schema and dropped
+// on the way out.
+func CommentOn(object, name, comment string) string {
+	if comment == "" {
+		return ""
+	}
+	return fmt.Sprintf("COMMENT ON %s %s IS '%s';", object, name,
+		strings.ReplaceAll(comment, "'", "''"))
+}

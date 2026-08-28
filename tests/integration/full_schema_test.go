@@ -95,6 +95,7 @@ var fullSchemaWant = map[string]map[string]int{
 	},
 	"sqlserver": {
 		"tables": 3, "columns": 17, "defaults": 6, "auto increment": 2,
+		"table comments": 1, "column comments": 1,
 		"primary keys": 3, "composite primary keys": 1,
 		"foreign keys": 3, "fk on delete": 2, "fk on update": 1, "self referencing fk": 1,
 		"unique constraints": 2, "composite unique": 1, "check constraints": 2,
@@ -307,4 +308,51 @@ func schemaFeatures(s *sqlmapper.Schema) map[string]int {
 		}
 	}
 	return c
+}
+
+// A comment is documentation its author wrote. Every parser read one and no
+// generator wrote one, so it reached the schema and was dropped again on the
+// way out, in every conversion.
+func TestCommentsSurviveTheConversion(t *testing.T) {
+	targets := []struct {
+		name string
+		db   func() sqlmapper.Database
+	}{
+		{"postgres", postgres.NewPostgreSQL},
+		{"mysql", mysql.NewMySQL},
+		{"oracle", oracle.NewOracle},
+		{"sqlserver", sqlserver.NewSQLServer},
+		// SQLite has nowhere to put one, so it keeps them as file comments.
+		{"sqlite", sqlite.NewSQLite},
+	}
+
+	for _, src := range fullSchemas {
+		schema, err := src.parser().Parse(loadFullSchema(t, src.file))
+		if err != nil {
+			t.Fatalf("%s parse: %v", src.name, err)
+		}
+
+		var want string
+		for _, table := range schema.Tables {
+			if table.Comment != "" {
+				want = table.Comment
+				break
+			}
+		}
+		if want == "" {
+			continue // the dialect states no comment this fixture can carry
+		}
+
+		for _, target := range targets {
+			t.Run(src.name+"_to_"+target.name, func(t *testing.T) {
+				out, err := target.db().Generate(schema)
+				if err != nil {
+					t.Fatalf("generate: %v", err)
+				}
+				if !strings.Contains(out, want) {
+					t.Errorf("the comment %q did not survive", want)
+				}
+			})
+		}
+	}
 }

@@ -253,8 +253,15 @@ behind that are what `tests/integration/full_schema_test.go` now holds a line
 against: it records how much of each feature every parser finds and fails if one
 of them starts finding less.
 
-Two things a dialect states are not read: SQL Server keeps comments in extended
-properties rather than in the DDL, and no dialect's partitioning is carried.
+Comments travel with the schema. Each dialect states one its own way, which is
+also how it is written back: `COMMENT ON` for PostgreSQL and Oracle, the column
+and table options for MySQL, an extended property for SQL Server. SQLite has
+nowhere to put one, so it keeps them as comments on the file rather than
+dropping them.
+
+Partitioning is the one thing a source can state that nothing carries. It is not
+a small gap: every dialect spells it differently enough that there is little to
+carry between them.
 
 That matrix is not a promise about every version of every engine. It is the range
 that was actually exercised. Untested: MySQL 9, PostgreSQL 18, Oracle 19c and

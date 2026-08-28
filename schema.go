@@ -114,6 +114,30 @@ func HasUniqueConstraint(constraints []Constraint, column string) bool {
 	return false
 }
 
+// Comment describes one comment a generator has to write out.
+type Comment struct {
+	Object  string // TABLE or COLUMN
+	Name    string // the table, or table.column
+	Comment string
+}
+
+// CommentStatements lists the comments a table carries, in the order they are
+// written: the table first, then its columns.
+func CommentStatements(table Table) []Comment {
+	var out []Comment
+	if table.Comment != "" {
+		out = append(out, Comment{Object: "TABLE", Name: table.Name, Comment: table.Comment})
+	}
+	for _, col := range table.Columns {
+		if col.Comment != "" {
+			out = append(out, Comment{
+				Object: "COLUMN", Name: table.Name + "." + col.Name, Comment: col.Comment,
+			})
+		}
+	}
+	return out
+}
+
 // Table represents a database table
 type Table struct {
 	Name        string

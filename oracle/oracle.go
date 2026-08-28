@@ -815,6 +815,14 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 		result.WriteString(";\n\n")
 	}
 
+	// Comments are stated after the tables they describe.
+	for _, table := range tables {
+		for _, c := range sqlmapper.CommentStatements(table) {
+			result.WriteString(sqlfmt.CommentOn(c.Object, c.Name, c.Comment))
+			result.WriteString("\n")
+		}
+	}
+
 	// Routines come after everything they can refer to. This used to write
 	// triggers only, and wrote a foreign body as if it were PL/SQL.
 	if routines := o.generateRoutinesSQL(schema); routines != "" {

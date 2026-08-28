@@ -274,3 +274,63 @@ func TestIsDeferred(t *testing.T) {
 	assert.False(t, isDeferred([]sqlmapper.Constraint{anonymous}, other))
 	assert.False(t, isDeferred(nil, named))
 }
+
+// SQL Server keeps a comment in an extended property rather than in the DDL,
+// and nothing read those, so a commented schema arrived with none of them.
+func TestSQLServer_ExtendedPropertyComments(t *testing.T) {
+	const script = `CREATE TABLE [dbo].[customers](
+    [id] [bigint] NOT NULL,
+    [email] [nvarchar](255) NOT NULL
+)
+GO
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'people who buy things',
+    @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'customers';
+GO
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'login address',
+    @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'customers',
+    @level2type=N'COLUMN', @level2name=N'email';
+GO
+EXEC sys.sp_addextendedproperty @name=N'Something_Else', @value=N'ignored',
+    @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'customers';
+GO
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'no such table',
+    @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'absent';
+GO
+`
+
+	schema, err := NewSQLServer().Parse(script)
+	assert.NoError(t, err)
+	assert.Len(t, schema.Tables, 1)
+
+	table := schema.Tables[0]
+	assert.Equal(t, "people who buy things", table.Comment,
+		"a property that is not MS_Description does not overwrite the comment")
+	assert.Equal(t, "login address", table.Columns[1].Comment)
+
+	// And they go back out the way SQL Server stores them.
+	out, err := NewSQLServer().Generate(schema)
+	assert.NoError(t, err)
+	assert.Contains(t, out, "sp_addextendedproperty")
+	assert.Contains(t, out, "@value=N'people who buy things'")
+	assert.Contains(t, out, "@level2type=N'COLUMN', @level2name=N'email'")
+}
+
+func TestMSSReferentialAction(t *testing.T) {
+	tests := map[string]string{
+		"":            "",
+		"CASCADE":     "CASCADE",
+		"cascade":     "CASCADE",
+		"SET NULL":    "SET NULL",
+		"SET DEFAULT": "SET DEFAULT",
+		"NO ACTION":   "NO ACTION",
+		// SQL Server has no RESTRICT; the standard says it behaves as NO ACTION.
+		"RESTRICT": "NO ACTION",
+		"NONSENSE": "",
+	}
+
+	for in, want := range tests {
+		if got := mssReferentialAction(in); got != want {
+			t.Errorf("mssReferentialAction(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -300,6 +300,14 @@ func (p *PostgreSQL) Generate(schema *sqlmapper.Schema) (string, error) {
 	// Views are emitted last so the tables they select from already exist. The
 	// body is carried over verbatim: this package converts DDL structure, not
 	// query syntax, so a view written in another dialect's SQL may need editing.
+	// Comments are stated after the tables they describe.
+	for _, table := range tables {
+		for _, stmt := range sqlmapper.CommentStatements(table) {
+			result.WriteString(sqlfmt.CommentOn(stmt.Object, stmt.Name, stmt.Comment))
+			result.WriteString("\n")
+		}
+	}
+
 	booleans := p.booleanColumns(schema)
 	for _, view := range schema.Views {
 		result.WriteString(p.generateViewSQL(view, booleans))
