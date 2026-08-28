@@ -317,3 +317,38 @@ CREATE UNIQUE INDEX idx_price ON products(price);`),
 		})
 	}
 }
+
+// Comments were looked for over the whole file once per table, which was both
+// slow and wrong: the table comment used a first-match search, so with two
+// commented tables only the first could ever be found.
+func TestMySQL_CommentsOnSeveralTables(t *testing.T) {
+	const ddl = "CREATE TABLE `users` (`id` int, `email` varchar(255));\n" +
+		"CREATE TABLE `orders` (`id` int, `total` decimal(10,2));\n" +
+		"ALTER TABLE `users` COMMENT = 'application users';\n" +
+		"ALTER TABLE `orders` COMMENT = 'placed orders';\n" +
+		"ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) COMMENT 'login address';\n" +
+		"ALTER TABLE `orders` MODIFY COLUMN `total` decimal(10,2) COMMENT 'in cents';\n"
+
+	schema, err := NewMySQL().Parse(ddl)
+	assert.NoError(t, err)
+
+	byName := map[string]sqlmapper.Table{}
+	for _, table := range schema.Tables {
+		byName[table.Name] = table
+	}
+
+	assert.Equal(t, "application users", byName["users"].Comment)
+	assert.Equal(t, "placed orders", byName["orders"].Comment, "the second table has a comment too")
+
+	assert.Equal(t, "login address", columnComment(byName["users"], "email"))
+	assert.Equal(t, "in cents", columnComment(byName["orders"], "total"))
+}
+
+func columnComment(table sqlmapper.Table, name string) string {
+	for _, c := range table.Columns {
+		if c.Name == name {
+			return c.Comment
+		}
+	}
+	return ""
+}

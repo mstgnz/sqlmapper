@@ -163,6 +163,11 @@ func NewSQLServer() sqlmapper.Database {
 //   - *sqlmapper.Schema: The parsed schema structure
 //   - error: An error if parsing fails or if the content is empty
 func (s *SQLServer) Parse(content string) (*sqlmapper.Schema, error) {
+	// Start from an empty schema. A parser used a second time used to add
+	// to what it read the first, so a caller reusing one silently got two
+	// schemas merged into one.
+	s.schema = &sqlmapper.Schema{SourceDialect: sqlmapper.SQLServer}
+
 	if content == "" {
 		return nil, errors.New("empty content")
 	}
@@ -472,12 +477,12 @@ func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 	}
 	switch c.Type {
 	case "PRIMARY KEY":
-		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "PRIMARY KEY (%s)", strings.Join(c.Columns, ", "))
 	case "UNIQUE":
-		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "UNIQUE (%s)", strings.Join(c.Columns, ", "))
 	case "FOREIGN KEY":
-		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
-			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
+		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
 		if c.DeleteRule != "" {
 			sb.WriteString(" ON DELETE ")
 			sb.WriteString(c.DeleteRule)

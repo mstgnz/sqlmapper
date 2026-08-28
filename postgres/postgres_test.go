@@ -482,3 +482,37 @@ CREATE TABLE users (id bigint PRIMARY KEY);`
 	assert.Len(t, schema.Tables, 1)
 	assert.Equal(t, "users", schema.Tables[0].Name)
 }
+
+// The same as MySQL: comments were looked for over the whole file once per
+// table.
+func TestPostgreSQL_CommentsOnSeveralTables(t *testing.T) {
+	const ddl = `CREATE TABLE users (id bigint, email character varying(255));
+CREATE TABLE orders (id bigint, total numeric(10,2));
+COMMENT ON TABLE users IS 'application users';
+COMMENT ON TABLE orders IS 'placed orders';
+COMMENT ON COLUMN users.email IS 'login address';
+COMMENT ON COLUMN orders.total IS 'in cents';
+`
+
+	schema, err := NewPostgreSQL().Parse(ddl)
+	assert.NoError(t, err)
+
+	byName := map[string]sqlmapper.Table{}
+	for _, table := range schema.Tables {
+		byName[table.Name] = table
+	}
+
+	assert.Equal(t, "application users", byName["users"].Comment)
+	assert.Equal(t, "placed orders", byName["orders"].Comment)
+	assert.Equal(t, "login address", pgColumnComment(byName["users"], "email"))
+	assert.Equal(t, "in cents", pgColumnComment(byName["orders"], "total"))
+}
+
+func pgColumnComment(table sqlmapper.Table, name string) string {
+	for _, c := range table.Columns {
+		if c.Name == name {
+			return c.Comment
+		}
+	}
+	return ""
+}

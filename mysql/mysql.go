@@ -219,6 +219,11 @@ func NewMySQL() sqlmapper.Database {
 
 // Parse takes a MySQL SQL dump and parses it into a common schema structure.
 func (m *MySQL) Parse(content string) (*sqlmapper.Schema, error) {
+	// Start from an empty schema. A parser used a second time used to add
+	// to what it read the first, so a caller reusing one silently got two
+	// schemas merged into one.
+	m.schema = &sqlmapper.Schema{SourceDialect: sqlmapper.MySQL}
+
 	if content == "" {
 		return nil, errors.New("empty content")
 	}
@@ -353,6 +358,17 @@ const (
 var mysqlCreateTableRe = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w.]+)\s*\(`)
 
 func (m *MySQL) parseTables(content string) error {
+	// Comments arrive in ALTER TABLE statements of their own, anywhere in the
+	// file, so they are collected once here rather than looked for again for
+	// every table. Scanning the whole dump inside the loop made the cost grow
+	// with the square of the table count: 500 tables took two seconds, of which
+	// almost all was these two patterns re-reading the file.
+	//
+	// It was wrong as well as slow. The table comment was read with a
+	// first-match search, so with two commented tables only the first could
+	// ever be found.
+	tableComments, columnComments := mysqlComments(content)
+
 	// Split into statements first to prevent the regex from greedily matching
 	// across multiple CREATE TABLE blocks.
 	statements := strings.Split(content, ";")
@@ -385,19 +401,13 @@ func (m *MySQL) parseTables(content string) error {
 			return err
 		}
 
-		// Table-level comment via ALTER TABLE (search in full content)
-		if cm := mysqlTableCommentRe.FindStringSubmatch(content); len(cm) > 2 && cm[1] == tableName {
-			table.Comment = cm[2]
-		}
-
-		// Column comments via ALTER TABLE MODIFY COLUMN
-		for _, cc := range mysqlColCommentRe.FindAllStringSubmatch(content, -1) {
-			if len(cc) > 3 && cc[1] == tableName {
-				for i := range table.Columns {
-					if table.Columns[i].Name == cc[2] {
-						table.Columns[i].Comment = cc[3]
-						break
-					}
+		// Comments stated by a later ALTER TABLE, collected once before the
+		// loop.
+		table.Comment = tableComments[tableName]
+		if byColumn := columnComments[tableName]; byColumn != nil {
+			for i := range table.Columns {
+				if c, ok := byColumn[table.Columns[i].Name]; ok {
+					table.Columns[i].Comment = c
 				}
 			}
 		}
@@ -450,7 +460,8 @@ func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.T
 	for _, def := range defs {
 		parenCount += strings.Count(def, "(") - strings.Count(def, ")")
 		if parenCount > 0 {
-			current.WriteString(def + ",")
+			current.WriteString(def)
+			current.WriteString(",")
 		} else {
 			if current.Len() > 0 {
 				current.WriteString(def)
@@ -933,7 +944,8 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 	totalItems := len(table.Columns) + len(tableConstraints)
 
 	for i, col := range table.Columns {
-		result.WriteString("    " + m.generateColumnSQL(col, inlinePKCols[col.Name]))
+		result.WriteString("    ")
+		result.WriteString(m.generateColumnSQL(col, inlinePKCols[col.Name]))
 		if i < totalItems-1 {
 			result.WriteString(",")
 		}
@@ -941,7 +953,8 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 	}
 
 	for i, c := range tableConstraints {
-		result.WriteString("    " + m.generateConstraintSQL(c, columnsByName(table)))
+		result.WriteString("    ")
+		result.WriteString(m.generateConstraintSQL(c, columnsByName(table)))
 		if len(table.Columns)+i < totalItems-1 {
 			result.WriteString(",")
 		}
@@ -1097,10 +1110,12 @@ func (m *MySQL) generateConstraintSQL(c sqlmapper.Constraint, cols map[string]sq
 		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
 		if c.DeleteRule != "" {
-			sb.WriteString(" ON DELETE " + c.DeleteRule)
+			sb.WriteString(" ON DELETE ")
+			sb.WriteString(c.DeleteRule)
 		}
 		if c.UpdateRule != "" {
-			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+			sb.WriteString(" ON UPDATE ")
+			sb.WriteString(c.UpdateRule)
 		}
 	case "UNIQUE":
 		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", m.mysqlKeyColumns(c.Columns, cols)))
@@ -1271,4 +1286,26 @@ func splitKeyColumns(list string) []string {
 		}
 	}
 	return parts
+}
+
+// mysqlComments collects the comments an ALTER TABLE states, by table and by
+// column.
+func mysqlComments(content string) (tables map[string]string, columns map[string]map[string]string) {
+	tables = make(map[string]string)
+	columns = make(map[string]map[string]string)
+
+	for _, m := range mysqlTableCommentRe.FindAllStringSubmatch(content, -1) {
+		if len(m) > 2 {
+			tables[m[1]] = m[2]
+		}
+	}
+	for _, m := range mysqlColCommentRe.FindAllStringSubmatch(content, -1) {
+		if len(m) > 3 {
+			if columns[m[1]] == nil {
+				columns[m[1]] = make(map[string]string)
+			}
+			columns[m[1]][m[2]] = m[3]
+		}
+	}
+	return tables, columns
 }

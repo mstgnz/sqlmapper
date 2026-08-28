@@ -302,6 +302,7 @@ and comes back as `SMALLINT`. Everything else lands on a fixed point, which
 
 ```bash
 make check     # everything CI runs, in the same order
+make bench     # parse, generate, convert, stream, and how each scales
 make test      # unit and integration tests
 make test-race # the stream parsers are exercised concurrently
 make cover     # per-package coverage, failing below the 85% floor
@@ -309,6 +310,11 @@ make examples  # end-to-end conversions over the sample dumps
 make lint      # the check set is pinned in .golangci.yml
 make build     # the command, into ./bin
 ```
+
+`make bench` reports MB/s for schemas of 10, 100 and 500 tables. That figure is
+the one to watch: it has to stay flat. Two parsers looked for comments over the
+whole file once per table, which made the cost grow with the square of the table
+count, and a 500-table dump took two seconds instead of forty milliseconds.
 
 `make` on its own lists every target. `make check` is the whole CI pipeline, so
 a red build can be reproduced with one command. The linter version is pinned so

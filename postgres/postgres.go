@@ -162,6 +162,11 @@ func NewPostgreSQL() sqlmapper.Database {
 
 // Parse takes a PostgreSQL SQL dump and parses it into a common schema structure.
 func (p *PostgreSQL) Parse(content string) (*sqlmapper.Schema, error) {
+	// Start from an empty schema. A parser used a second time used to add
+	// to what it read the first, so a caller reusing one silently got two
+	// schemas merged into one.
+	p.schema = &sqlmapper.Schema{SourceDialect: sqlmapper.PostgreSQL}
+
 	if content == "" {
 		return nil, errors.New("empty content")
 	}
@@ -451,6 +456,12 @@ func (p *PostgreSQL) parseAlterColumnDefaults(content string) error {
 }
 
 func (p *PostgreSQL) parseTables(content string) error {
+	// Comments arrive in COMMENT ON statements of their own, anywhere in the
+	// file, so they are collected once here rather than looked for again for
+	// every table. Scanning the whole dump inside the loop made the cost grow
+	// with the square of the table count.
+	tableComments, columnComments := pgComments(content)
+
 	// Split into statements to avoid greedy matching across multiple CREATE TABLE blocks.
 	statements := strings.Split(content, ";")
 	for _, stmt := range statements {
@@ -488,20 +499,12 @@ func (p *PostgreSQL) parseTables(content string) error {
 			return err
 		}
 
-		// Table comment (search full content)
-		for _, cm := range pgTableCommentRe.FindAllStringSubmatch(content, -1) {
-			if len(cm) > 2 && cm[1] == tableName {
-				table.Comment = cm[2]
-			}
-		}
-		// Column comments
-		for _, cc := range pgColCommentRe.FindAllStringSubmatch(content, -1) {
-			if len(cc) > 3 && cc[1] == tableName {
-				for i := range table.Columns {
-					if table.Columns[i].Name == cc[2] {
-						table.Columns[i].Comment = cc[3]
-						break
-					}
+		// Comments stated by a later COMMENT ON, collected once before the loop.
+		table.Comment = tableComments[tableName]
+		if byColumn := columnComments[tableName]; byColumn != nil {
+			for i := range table.Columns {
+				if c, ok := byColumn[table.Columns[i].Name]; ok {
+					table.Columns[i].Comment = c
 				}
 			}
 		}
@@ -626,7 +629,8 @@ func (p *PostgreSQL) parseColumnsAndConstraints(columnDefs string, table *sqlmap
 	for _, def := range defs {
 		parenCount += strings.Count(def, "(") - strings.Count(def, ")")
 		if parenCount > 0 {
-			current.WriteString(def + ",")
+			current.WriteString(def)
+			current.WriteString(",")
 		} else {
 			if current.Len() > 0 {
 				current.WriteString(def)
@@ -1283,7 +1287,8 @@ func (p *PostgreSQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmappe
 
 	result.WriteString(")")
 	if table.TableSpace != "" {
-		result.WriteString(" TABLESPACE " + table.TableSpace)
+		result.WriteString(" TABLESPACE ")
+		result.WriteString(table.TableSpace)
 	}
 	result.WriteString(";")
 	return result.String()
@@ -1440,10 +1445,12 @@ func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
 		if c.DeleteRule != "" {
-			sb.WriteString(" ON DELETE " + c.DeleteRule)
+			sb.WriteString(" ON DELETE ")
+			sb.WriteString(c.DeleteRule)
 		}
 		if c.UpdateRule != "" {
-			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+			sb.WriteString(" ON UPDATE ")
+			sb.WriteString(c.UpdateRule)
 		}
 	case "UNIQUE":
 		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
@@ -1460,16 +1467,23 @@ func (p *PostgreSQL) generateIndexSQL(tableName string, index sqlmapper.Index) s
 	} else {
 		sb.WriteString("CREATE INDEX ")
 	}
-	sb.WriteString(index.Name + " ON " + tableName)
+	sb.WriteString(index.Name)
+	sb.WriteString(" ON ")
+	sb.WriteString(tableName)
 	if index.Type != "" {
-		sb.WriteString(" USING " + index.Type)
+		sb.WriteString(" USING ")
+		sb.WriteString(index.Type)
 	}
-	sb.WriteString("(" + strings.Join(index.Columns, ", ") + ")")
+	sb.WriteString("(")
+	sb.WriteString(strings.Join(index.Columns, ", "))
+	sb.WriteString(")")
 	if index.Condition != "" {
-		sb.WriteString(" WHERE " + index.Condition)
+		sb.WriteString(" WHERE ")
+		sb.WriteString(index.Condition)
 	}
 	if index.TableSpace != "" {
-		sb.WriteString(" TABLESPACE " + index.TableSpace)
+		sb.WriteString(" TABLESPACE ")
+		sb.WriteString(index.TableSpace)
 	}
 	sb.WriteString(";")
 	return sb.String()
@@ -1657,4 +1671,25 @@ func (p *PostgreSQL) enumTypesSQL(tables []sqlmapper.Table) []string {
 		}
 	}
 	return out
+}
+
+// pgComments collects the comments a COMMENT ON states, by table and by column.
+func pgComments(content string) (tables map[string]string, columns map[string]map[string]string) {
+	tables = make(map[string]string)
+	columns = make(map[string]map[string]string)
+
+	for _, m := range pgTableCommentRe.FindAllStringSubmatch(content, -1) {
+		if len(m) > 2 {
+			tables[m[1]] = m[2]
+		}
+	}
+	for _, m := range pgColCommentRe.FindAllStringSubmatch(content, -1) {
+		if len(m) > 3 {
+			if columns[m[1]] == nil {
+				columns[m[1]] = make(map[string]string)
+			}
+			columns[m[1]][m[2]] = m[3]
+		}
+	}
+	return tables, columns
 }

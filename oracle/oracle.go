@@ -230,6 +230,11 @@ func NewOracle() sqlmapper.Database {
 //   - *sqlmapper.Schema: The parsed schema structure
 //   - error: An error if parsing fails or if the content is empty
 func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
+	// Start from an empty schema. A parser used a second time used to add
+	// to what it read the first, so a caller reusing one silently got two
+	// schemas merged into one.
+	o.schema = &sqlmapper.Schema{SourceDialect: sqlmapper.Oracle}
+
 	if content == "" {
 		return nil, errors.New("empty content")
 	}
@@ -446,6 +451,15 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 			continue
 		}
 
+		// An identity column carries a long option list that would otherwise be
+		// read as part of the type and the default. It is stripped first so the
+		// fields below are the fields of what is left: taking them from the
+		// original text and then slicing the shortened one ran off the end.
+		autoIncrement := oracleIdentityRe.MatchString(colDef)
+		if autoIncrement {
+			colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
+		}
+
 		parts := strings.Fields(colDef)
 		if len(parts) < 2 {
 			continue
@@ -455,14 +469,8 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 			Name: unquoteOracleIdent(parts[0]),
 			// Oracle columns are nullable unless the definition says otherwise.
 			// Leaving this at the zero value marked every column NOT NULL.
-			IsNullable: true,
-		}
-
-		// An identity column carries a long option list that would otherwise be
-		// read as part of the type and the default.
-		if oracleIdentityRe.MatchString(colDef) {
-			col.AutoIncrement = true
-			colDef = oracleIdentityRe.ReplaceAllString(colDef, "")
+			IsNullable:    true,
+			AutoIncrement: autoIncrement,
 		}
 
 		rest := strings.TrimSpace(colDef[len(parts[0]):])
@@ -1094,16 +1102,18 @@ func isNumericLiteral(s string) bool {
 func (o *Oracle) generateConstraintSQL(c sqlmapper.Constraint) string {
 	var sb strings.Builder
 	if c.Name != "" {
-		sb.WriteString("CONSTRAINT " + c.Name + " ")
+		sb.WriteString("CONSTRAINT ")
+		sb.WriteString(c.Name)
+		sb.WriteString(" ")
 	}
 	switch c.Type {
 	case "PRIMARY KEY":
-		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "PRIMARY KEY (%s)", strings.Join(c.Columns, ", "))
 	case "UNIQUE":
-		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "UNIQUE (%s)", strings.Join(c.Columns, ", "))
 	case "FOREIGN KEY":
-		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
-			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
+		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
 		// Oracle supports ON DELETE CASCADE and SET NULL only; it has no
 		// ON UPDATE action at all, so those are dropped rather than emitted
 		// as syntax it would reject.
@@ -1123,7 +1133,9 @@ func (o *Oracle) generateConstraintSQL(c sqlmapper.Constraint) string {
 // constraints. deferred lists the foreign keys that must be added afterwards.
 func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Constraint) string {
 	var result strings.Builder
-	result.WriteString("CREATE TABLE " + table.Name + " (\n")
+	result.WriteString("CREATE TABLE ")
+	result.WriteString(table.Name)
+	result.WriteString(" (\n")
 
 	// A single-column PK on an identity column reads better inline; every other
 	// PK is emitted as a table-level constraint. Exactly one of the two must
@@ -1187,7 +1199,8 @@ func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Co
 	result.WriteString(strings.Join(parts, ",\n"))
 	result.WriteString("\n)")
 	if table.TableSpace != "" {
-		result.WriteString(" TABLESPACE " + table.TableSpace)
+		result.WriteString(" TABLESPACE ")
+		result.WriteString(table.TableSpace)
 	}
 	result.WriteString(";\n")
 	return result.String()
