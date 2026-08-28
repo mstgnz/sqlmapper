@@ -537,6 +537,14 @@ func (m *MySQL) parseTables(content string) error {
 			table.Comment = strings.ReplaceAll(cm[1], "''", "'")
 		}
 
+		// The rest of the options: the engine, the character set and the
+		// collation. Nothing read them, so a MySQL table converted back to
+		// MySQL lost its collation and took whatever the server defaulted to,
+		// which changes how its text sorts and compares.
+		if close := closingParen(stmt, openParen); close > 0 {
+			table.Options = mysqlTableOptions(stmt[close+1:])
+		}
+
 		// A later ALTER TABLE wins, and those were collected before the loop.
 		if c, ok := tableComments[tableName]; ok {
 			table.Comment = c
@@ -1128,6 +1136,15 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 
 	result.WriteString(")")
 
+	// The engine, character set and collation, which only MySQL has and only
+	// MySQL is given. They were read by nothing, so a MySQL table converted back
+	// to MySQL took whatever the server defaulted to, which changes how its text
+	// sorts and compares.
+	if table.Options != "" {
+		result.WriteString(" ")
+		result.WriteString(table.Options)
+	}
+
 	// MySQL states a table comment in the options rather than in a statement of
 	// its own, which is also where it reads one from.
 	if table.Comment != "" {
@@ -1553,4 +1570,38 @@ func mysqlIsIntegerType(rendered string) bool {
 		return true
 	}
 	return false
+}
+
+// closingParen returns the index of the parenthesis that closes the one at open,
+// which is where a table's options begin.
+func closingParen(stmt string, open int) int {
+	depth, inString := 0, false
+	for i := open; i < len(stmt); i++ {
+		switch c := stmt[i]; {
+		case c == '\'':
+			inString = !inString
+		case inString:
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// mysqlTableOptionRe reads the options worth carrying. The comment is left out:
+// it is read on its own and writing it from here too would state it twice.
+var mysqlTableOptionRe = regexp.MustCompile(`(?i)\b((?:DEFAULT\s+)?(?:ENGINE|CHARSET|CHARACTER\s+SET|COLLATE|ROW_FORMAT|AUTO_INCREMENT)\s*=?\s*[\w]+)`)
+
+// mysqlTableOptions collects a table's options from the text after its closing
+// parenthesis.
+func mysqlTableOptions(tail string) string {
+	var parts []string
+	for _, m := range mysqlTableOptionRe.FindAllStringSubmatch(tail, -1) {
+		parts = append(parts, strings.Join(strings.Fields(m[1]), " "))
+	}
+	return strings.Join(parts, " ")
 }

@@ -412,3 +412,54 @@ func TestMySQLStreamReadsAStandaloneIndex(t *testing.T) {
 	assert.Equal(t, []string{"email"}, indexes[0].Columns)
 	assert.False(t, indexes[1].IsUnique)
 }
+
+// TestMySQLTableOptions pins the engine, character set and collation. Nothing
+// read them, so a MySQL table converted back to MySQL took whatever the server
+// defaulted to, which changes how its text sorts and compares.
+func TestMySQLTableOptions(t *testing.T) {
+	const dump = "CREATE TABLE `a` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `note` varchar(20) DEFAULT 'x)y'\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='people';\n" +
+		"CREATE TABLE `b` (`id` int) ENGINE=MyISAM;\n" +
+		"CREATE TABLE `c` (`id` int);\n"
+
+	schema, err := NewMySQL().Parse(dump)
+	require.NoError(t, err)
+	require.Len(t, schema.Tables, 3)
+
+	opts := map[string]string{}
+	for _, tb := range schema.Tables {
+		opts[tb.Name] = tb.Options
+	}
+	assert.Equal(t, "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", opts["a"])
+	assert.Equal(t, "ENGINE=MyISAM", opts["b"])
+	assert.Empty(t, opts["c"], "a table with no options states none")
+
+	// The comment is read on its own and must not be collected here too, or it
+	// is written twice.
+	assert.NotContains(t, opts["a"], "COMMENT")
+
+	out, err := NewMySQL().Generate(schema)
+	require.NoError(t, err)
+	assert.Contains(t, out, ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='people';")
+	assert.Contains(t, out, ") ENGINE=MyISAM;")
+	assert.Equal(t, 1, strings.Count(out, "COMMENT='people'"))
+}
+
+// TestClosingParen covers the reader that finds where a table's options begin.
+// A parenthesis inside a string literal is not one of the table's.
+func TestClosingParen(t *testing.T) {
+	cases := map[string]int{
+		"CREATE TABLE t (a int)":                     21,
+		"CREATE TABLE t (a int, b decimal(10,2))":    38,
+		"CREATE TABLE t (a varchar(5) DEFAULT 'x)')": 41,
+		"CREATE TABLE t (a int":                      -1,
+	}
+	for stmt, want := range cases {
+		open := strings.IndexByte(stmt, '(')
+		if got := closingParen(stmt, open); got != want {
+			t.Errorf("closingParen(%q) = %d, want %d", stmt, got, want)
+		}
+	}
+}

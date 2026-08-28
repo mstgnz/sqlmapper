@@ -282,6 +282,12 @@ have none: the index widens into a full one and the dropped filter is written
 above it as a comment, because a conditional unique index that silently becomes
 unconditional starts rejecting rows that were legal before.
 
+MySQL's table options, the engine and the character set and the collation, are
+read and written back to MySQL. They mean nothing anywhere else and are dropped
+without a note, unlike a grant: PostgreSQL has one encoding for the whole
+database and `ENGINE=InnoDB` says nothing to it. Within MySQL they matter, and
+losing the collation changes how a table's text sorts and compares.
+
 A deferrable constraint keeps its deferral where the target has one, which is
 PostgreSQL and Oracle. That clause is what lets two rows referencing each other
 be inserted in one transaction, so losing it turns a schema that works into one
