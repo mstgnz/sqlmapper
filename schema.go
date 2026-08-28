@@ -25,6 +25,15 @@ const (
 )
 
 // Schema represents a database schema
+// Several fields below are carried by no parser and read by no generator:
+// Partitions, DatabaseLinks, Tablespaces, Roles, Users, Clusters,
+// MaterializedLogs, UserDefinedTypes, Table.Data, Table.Storage,
+// Index.Storage, Index.Compression, Table.Temporary, Column.Precision,
+// Extension.Version and Parameter.Default. They were removed once and put back:
+// this module is past v1, so taking an exported field away breaks every build
+// that names it, and tidiness does not pay for that. They go when there is a
+// reason to publish a v2, not before.
+
 type Schema struct {
 	// SourceDialect names the database the schema was parsed from. Parse sets
 	// it; a schema built by hand leaves it empty.
@@ -36,16 +45,24 @@ type Schema struct {
 	// assembled in Go is written out as the caller wrote it.
 	SourceDialect DatabaseType
 
-	Name        string
-	Tables      []Table
-	Procedures  []Procedure
-	Functions   []Function
-	Triggers    []Trigger
-	Views       []View
-	Sequences   []Sequence
-	Extensions  []Extension
-	Permissions []Permission
-	Types       []Type
+	Name             string
+	Tables           []Table
+	Procedures       []Procedure
+	Functions        []Function
+	Triggers         []Trigger
+	Views            []View
+	Sequences        []Sequence
+	Extensions       []Extension
+	Permissions      []Permission
+	UserDefinedTypes []UserDefinedType
+	Partitions       map[string][]Partition // table_name -> partitions
+	DatabaseLinks    []DatabaseLink
+	Tablespaces      []Tablespace
+	Roles            []Role
+	Users            []User
+	Clusters         []Cluster
+	MaterializedLogs []MaterializedViewLog
+	Types            []Type
 }
 
 // RoutinesAreNativeTo reports whether the schema's functions, procedures and
@@ -330,7 +347,10 @@ type Table struct {
 	Columns     []Column
 	Indexes     []Index
 	Constraints []Constraint
+	Data        []Row
 	TableSpace  string
+	Storage     *StorageClause
+	Temporary   bool
 	Comment     string
 	Options     string // Storage engine options (e.g., ENGINE=InnoDB, CHARSET=utf8mb4)
 }
@@ -341,6 +361,7 @@ type Column struct {
 	DataType        string
 	Length          int
 	Scale           int
+	Precision       int
 	IsNullable      bool `default:"true"`
 	DefaultValue    string
 	AutoIncrement   bool
@@ -376,6 +397,8 @@ type Index struct {
 	Type        string // BTREE, HASH etc.
 	Condition   string // WHERE clause
 	TableSpace  string
+	Storage     *StorageClause
+	Compression bool
 }
 
 // Constraint represents a table constraint
@@ -390,6 +413,11 @@ type Constraint struct {
 	CheckExpression string
 	Deferrable      bool
 	Initially       string // IMMEDIATE, DEFERRED
+}
+
+// Row represents table data
+type Row struct {
+	Values map[string]interface{}
 }
 
 // Procedure represents a stored procedure
@@ -428,6 +456,7 @@ type Parameter struct {
 	Name      string
 	DataType  string
 	Direction string // IN, OUT, INOUT
+	Default   string
 }
 
 // Trigger represents a database trigger
@@ -464,8 +493,9 @@ type Sequence struct {
 
 // Extension represents a database extension
 type Extension struct {
-	Name   string
-	Schema string
+	Name    string
+	Version string
+	Schema  string
 }
 
 // Permission represents a database permission
@@ -475,6 +505,115 @@ type Permission struct {
 	Object     string
 	Grantee    string
 	WithGrant  bool
+}
+
+// UserDefinedType represents custom data types
+type UserDefinedType struct {
+	Name       string
+	Schema     string
+	BaseType   string
+	Properties map[string]interface{}
+}
+
+// Partition represents table partition information
+type Partition struct {
+	Name          string
+	Type          string // RANGE, LIST, HASH
+	SubPartitions []SubPartition
+	Expression    string
+	Values        []string
+	TableSpace    string
+	Storage       *StorageClause
+}
+
+// SubPartition represents table sub-partition information
+type SubPartition struct {
+	Name       string
+	Type       string
+	Expression string
+	Values     []string
+	TableSpace string
+	Storage    *StorageClause
+}
+
+// MaterializedViewLog represents materialized view log information
+type MaterializedViewLog struct {
+	Name           string
+	Schema         string
+	TableName      string
+	Columns        []string
+	RowID          bool
+	PrimaryKey     bool
+	SequenceNumber bool
+	CommitSCN      bool
+	Storage        *StorageClause
+}
+
+// DatabaseLink represents database link information
+type DatabaseLink struct {
+	Name        string
+	Owner       string
+	ConnectInfo string
+	Public      bool
+}
+
+// Tablespace represents tablespace information
+type Tablespace struct {
+	Name        string
+	Type        string // PERMANENT, TEMPORARY
+	Status      string
+	Autoextend  bool
+	MaxSize     int64
+	InitialSize int64
+	DataFile    string
+	BlockSize   int
+	Logging     bool
+}
+
+// Role represents database role information
+type Role struct {
+	Name        string
+	Password    string
+	Permissions []Permission
+	Members     []string
+	System      bool
+}
+
+// User represents database user information
+type User struct {
+	Name        string
+	Password    string
+	DefaultRole string
+	Roles       []string
+	Permissions []Permission
+	Profile     string
+	Status      string
+	TableSpace  string
+	TempSpace   string
+}
+
+// Cluster represents Oracle cluster information
+type Cluster struct {
+	Name       string
+	Schema     string
+	TableSpace string
+	Key        []string
+	Tables     []string
+	Size       int
+	HashKeys   int
+	Storage    *StorageClause
+}
+
+// StorageClause represents storage properties
+type StorageClause struct {
+	Initial     int64
+	Next        int64
+	MinExtents  int
+	MaxExtents  int
+	Pctincrease int
+	Buffer      int
+	TableSpace  string
+	Logging     bool
 }
 
 // Parser represents an interface for database dump operations
