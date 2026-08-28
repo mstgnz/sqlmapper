@@ -83,3 +83,43 @@ func UpperASCIIBytes(b []byte) []byte {
 	}
 	return out
 }
+
+// BlankStringLiterals replaces the contents of every single-quoted string with
+// spaces, leaving the quotes and the length of the text unchanged.
+//
+// Keywords are matched by searching the definition, and a value can contain
+// one: mysqldump writes a column as
+//
+//	`email` varchar(255) NOT NULL COMMENT 'login address, unique'
+//
+// and a search for UNIQUE finds it inside the comment, which added a unique
+// constraint the schema never had. Blanking the contents lets the same search
+// stand while keeping every offset valid, because nothing changes length.
+func BlankStringLiterals(s string) string {
+	if !strings.ContainsRune(s, '\'') {
+		return s
+	}
+
+	b := []byte(s)
+	inString := false
+	for i := 0; i < len(b); i++ {
+		switch {
+		case b[i] == '\\' && inString && i+1 < len(b):
+			b[i+1] = ' '
+			i++
+		case b[i] == '\'':
+			// A doubled quote is an escaped one: both halves belong to the
+			// value, so both are blanked and the string stays open.
+			if inString && i+1 < len(b) && b[i+1] == '\'' {
+				b[i] = ' '
+				b[i+1] = ' '
+				i++
+				continue
+			}
+			inString = !inString
+		case inString:
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}

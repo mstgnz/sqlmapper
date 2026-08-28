@@ -132,7 +132,12 @@ func TestOracleStreamParser_GenerateStreamFullSchema(t *testing.T) {
 			Constraints: []sqlmapper.Constraint{
 				{Name: "uq_email", Type: "UNIQUE", Columns: []string{"email"}},
 			},
-			Indexes: []sqlmapper.Index{{Name: "idx_email", Columns: []string{"email"}, IsUnique: true}},
+			// idx_email covers the same column as uq_email, which Oracle already
+			// indexes, so it is left out: ORA-01408.
+			Indexes: []sqlmapper.Index{
+				{Name: "idx_email", Columns: []string{"email"}, IsUnique: true},
+				{Name: "idx_note", Columns: []string{"note"}},
+			},
 		}},
 		Views: []sqlmapper.View{{Name: "v", Definition: "SELECT id FROM users"}},
 		Functions: []sqlmapper.Function{
@@ -153,7 +158,8 @@ func TestOracleStreamParser_GenerateStreamFullSchema(t *testing.T) {
 	assert.Contains(t, got, "CREATE SEQUENCE s")
 	assert.Contains(t, got, "CREATE TYPE addr_t")
 	assert.Contains(t, got, "CREATE TABLE users")
-	assert.Contains(t, got, "idx_email")
+	assert.Contains(t, got, "idx_note")
+	assert.NotContains(t, got, "idx_email")
 	assert.Contains(t, got, "CREATE OR REPLACE VIEW v")
 }
 

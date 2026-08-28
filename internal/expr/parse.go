@@ -321,7 +321,21 @@ func (p *parser) parseTypeName() (string, error) {
 
 	var words []string
 	for p.peek().Kind == TokIdent {
-		words = append(words, p.next().Text)
+		var word strings.Builder
+		word.WriteString(p.next().Text)
+		// A type may be schema-qualified, "public.order_status", which
+		// pg_dump writes for a user-defined type. Stopping at the dot left the
+		// cast unparsed, so the whole expression came back untouched and
+		// PostgreSQL's :: reached targets that have no such syntax.
+		for p.at(TokPunct, ".") {
+			p.next()
+			if p.peek().Kind != TokIdent {
+				break
+			}
+			word.WriteString(".")
+			word.WriteString(p.next().Text)
+		}
+		words = append(words, word.String())
 	}
 	var name strings.Builder
 	name.WriteString(strings.Join(words, " "))

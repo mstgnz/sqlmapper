@@ -1,6 +1,10 @@
 package sqlmapper
 
-import "github.com/mstgnz/sqlmapper/internal/expr"
+import (
+	"strings"
+
+	"github.com/mstgnz/sqlmapper/internal/expr"
+)
 
 // DatabaseType represents the supported database types
 type DatabaseType string
@@ -96,6 +100,20 @@ func KeyColumns(table Table) map[string]bool {
 	return out
 }
 
+// HasUniqueConstraint reports whether a table constraint already covers the
+// named column on its own.
+//
+// A column marked unique and a UNIQUE constraint over the same column are the
+// same key, and writing both declares it twice: Oracle answers ORA-02261.
+func HasUniqueConstraint(constraints []Constraint, column string) bool {
+	for _, c := range constraints {
+		if c.Type == "UNIQUE" && len(c.Columns) == 1 && strings.EqualFold(c.Columns[0], column) {
+			return true
+		}
+	}
+	return false
+}
+
 // Table represents a database table
 type Table struct {
 	Name        string
@@ -186,6 +204,13 @@ type Function struct {
 	Body       string
 	Language   string
 	IsProc     bool
+
+	// Attributes carries what a dialect states about a routine besides its
+	// signature: DETERMINISTIC, READS SQL DATA, SQL SECURITY DEFINER. MySQL
+	// refuses to create a function without one of the first three while binary
+	// logging is on, so dropping them made a routine that came out of mysqldump
+	// fail to go back in.
+	Attributes []string
 }
 
 // Parameter represents a procedure or function parameter

@@ -427,8 +427,12 @@ func (p *OracleStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 			return err
 		}
 
-		// Generate indexes for this table
+		// Generate indexes for this table, leaving out the ones a key already
+		// builds: Oracle refuses a duplicate with ORA-01408.
 		for _, index := range table.Indexes {
+			if oracleIndexIsRedundant(table, index) {
+				continue
+			}
 			stmt := p.oracle.generateIndexSQL(table.Name, index)
 			if _, err := writer.Write([]byte(sqlfmt.Terminate(stmt, ";") + "\n")); err != nil {
 				return err

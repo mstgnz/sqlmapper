@@ -222,7 +222,10 @@ func TestOracleGenerateFullSchema(t *testing.T) {
 				{Name: "uq_email", Type: "UNIQUE", Columns: []string{"email"}},
 			},
 			Indexes: []sqlmapper.Index{
+				// Oracle indexes a unique key of its own, so one over the same
+				// column is a duplicate it refuses to create: ORA-01408.
 				{Name: "idx_email", Columns: []string{"email"}, IsUnique: true},
+				{Name: "idx_note", Columns: []string{"note"}},
 			},
 		}},
 	}
@@ -232,7 +235,9 @@ func TestOracleGenerateFullSchema(t *testing.T) {
 
 	assert.Contains(t, out, "CREATE TABLE users")
 	assert.Contains(t, out, "VARCHAR2(255)")
-	assert.Contains(t, out, "idx_email")
+	assert.Contains(t, out, "idx_note")
+	assert.NotContains(t, out, "idx_email",
+		"an index over a unique key's own columns is one Oracle will not create")
 }
 
 // TestOracleStreamParser_SerialAndParallelAgree pins the two dispatchers together.

@@ -107,12 +107,29 @@ var (
 	// mysqldump writes a routine with a DEFINER clause and backtick-quoted
 	// names, so both are optional here. Without them a dumped trigger was read
 	// as no trigger at all.
-	mysqlFuncRe         = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefiner + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)\s+RETURNS\s+(\w+)\s+BEGIN\s+(.*?)\s+END`)
-	mysqlProcRe         = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerProc + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
-	mysqlTriggerRe      = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerTrigger + "`?" + `([\w.]+)` + "`?" + `\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
-	mysqlGrantRe        = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+([\w.*]+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
-	mysqlGrantProcRe    = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:PROCEDURE|FUNCTION)\s+(\w+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
-	mysqlRevokeRe       = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+([\w.*]+)\s+FROM\s+'([^']+)'@'([^']+)';`)
+	// A real function's return type carries its own parentheses,
+	// DECIMAL(12,2), and mysqldump writes the characteristics between
+	// RETURNS and the body: READS SQL DATA, DETERMINISTIC, SQL SECURITY.
+	// Neither was allowed for, so no function in a real dump was found.
+	mysqlFuncRe = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefiner + "`?" + `([\w.]+)` + "`?" +
+		`\s*\((.*?)\)\s+RETURNS\s+(\w+(?:\s*\([^)]*\))?)` +
+		`((?:\s+(?:NOT\s+DETERMINISTIC|DETERMINISTIC|CONTAINS\s+SQL|NO\s+SQL|` +
+		`READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|SQL\s+SECURITY\s+\w+|LANGUAGE\s+SQL))*)` +
+		`\s+BEGIN\s+(.*?)\s+END`)
+
+	// mysqlAttrRe picks the individual characteristics out of what sits between
+	// RETURNS and the body.
+	mysqlAttrRe = regexp.MustCompile(`(?i)NOT\s+DETERMINISTIC|DETERMINISTIC|CONTAINS\s+SQL|NO\s+SQL|` +
+		`READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|SQL\s+SECURITY\s+\w+`)
+	mysqlProcRe      = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerProc + "`?" + `([\w.]+)` + "`?" + `\s*\((.*?)\)\s+BEGIN\s+(.*?)\s+END`)
+	mysqlTriggerRe   = regexp.MustCompile(`(?i)CREATE\s+` + mysqlDefinerTrigger + "`?" + `([\w.]+)` + "`?" + `\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+` + "`?" + `([\w.]+)` + "`?" + `\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.*?)\s+END`)
+	mysqlGrantRe     = regexp.MustCompile(`(?i)GRANT\s+(.*?)\s+ON\s+([\w.*]+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
+	mysqlGrantProcRe = regexp.MustCompile(`(?i)GRANT\s+EXECUTE\s+ON\s+(?:PROCEDURE|FUNCTION)\s+(\w+)\s+TO\s+'([^']+)'@'([^']+)'(?:\s+WITH\s+GRANT\s+OPTION)?;`)
+	mysqlRevokeRe    = regexp.MustCompile(`(?i)REVOKE\s+(.*?)\s+ON\s+([\w.*]+)\s+FROM\s+'([^']+)'@'([^']+)';`)
+	// mysqldump states both comments where they are declared, not in an ALTER.
+	mysqlInlineColCommentRe   = regexp.MustCompile(`(?i)\bCOMMENT\s+'((?:[^']|'')*)'`)
+	mysqlInlineTableCommentRe = regexp.MustCompile(`(?i)\)[^()]*\bCOMMENT\s*=\s*'((?:[^']|'')*)'`)
+
 	mysqlTableCommentRe = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+` + "`?" + `([\w.]+)` + "`?" + `\s+COMMENT\s*=\s*'([^']+)';`)
 	mysqlColCommentRe   = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+` + "`?" + `([\w.]+)` + "`?" + `\s+MODIFY\s+COLUMN\s+(\w+)[^']+COMMENT\s*'([^']+)';`)
 	mysqlEnumValuesRe   = regexp.MustCompile(`(?i)(ENUM|SET)\s*\(([^)]+)\)`)
@@ -401,9 +418,16 @@ func (m *MySQL) parseTables(content string) error {
 			return err
 		}
 
-		// Comments stated by a later ALTER TABLE, collected once before the
-		// loop.
-		table.Comment = tableComments[tableName]
+		// mysqldump states the table comment in the options after the closing
+		// parenthesis; only the ALTER form was read before.
+		if cm := mysqlInlineTableCommentRe.FindStringSubmatch(stmt); len(cm) > 1 {
+			table.Comment = strings.ReplaceAll(cm[1], "''", "'")
+		}
+
+		// A later ALTER TABLE wins, and those were collected before the loop.
+		if c, ok := tableComments[tableName]; ok {
+			table.Comment = c
+		}
 		if byColumn := columnComments[tableName]; byColumn != nil {
 			for i := range table.Columns {
 				if c, ok := byColumn[table.Columns[i].Name]; ok {
@@ -452,26 +476,10 @@ func extractBalancedParens(s string, openIdx int) (string, int) {
 
 // parseColumnsAndConstraints splits a CREATE TABLE body and processes each part.
 func (m *MySQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.Table) error {
-	defs := strings.Split(columnDefs, ",")
-	var finalDefs []string
-	var current strings.Builder
-	parenCount := 0
-
-	for _, def := range defs {
-		parenCount += strings.Count(def, "(") - strings.Count(def, ")")
-		if parenCount > 0 {
-			current.WriteString(def)
-			current.WriteString(",")
-		} else {
-			if current.Len() > 0 {
-				current.WriteString(def)
-				finalDefs = append(finalDefs, current.String())
-				current.Reset()
-			} else {
-				finalDefs = append(finalDefs, def)
-			}
-		}
-	}
+	// Splitting on every comma and rejoining by parenthesis depth cut a
+	// definition in half at the comma inside a comment, and the tail then read
+	// as a constraint of its own.
+	finalDefs := sqlfmt.SplitTopLevelCommas(columnDefs)
 
 	for _, def := range finalDefs {
 		def = strings.TrimSpace(def)
@@ -565,7 +573,10 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 		IsNullable: true,
 	}
 
-	defUpper := keyword.UpperASCII(def)
+	// Keywords are matched on a copy with the string values blanked out, or a
+	// column commented "login address, unique" gains a unique constraint it
+	// never had. The blanking preserves length, so offsets into def stay valid.
+	defUpper := keyword.UpperASCII(keyword.BlankStringLiterals(def))
 
 	// Handle ENUM and SET – they contain parenthesised string values
 	if enumMatch := mysqlEnumValuesRe.FindStringSubmatch(def); len(enumMatch) > 2 {
@@ -627,6 +638,12 @@ func (m *MySQL) parseColumn(def string) (sqlmapper.Column, error) {
 		default:
 			column.DefaultValue = defaultPart
 		}
+	}
+
+	// mysqldump writes a column comment inline rather than in an ALTER of
+	// its own, and only the ALTER form was read.
+	if cm := mysqlInlineColCommentRe.FindStringSubmatch(def); len(cm) > 1 {
+		column.Comment = cm[1]
 	}
 
 	return column, nil
@@ -772,7 +789,10 @@ func (m *MySQL) parseFunctions(content string) error {
 		if len(match) < 5 {
 			continue
 		}
-		fn := sqlmapper.Function{Returns: match[3], Body: match[4]}
+		fn := sqlmapper.Function{Returns: match[3], Body: match[5]}
+		for _, a := range mysqlAttrRe.FindAllString(match[4], -1) {
+			fn.Attributes = append(fn.Attributes, strings.ToUpper(strings.Join(strings.Fields(a), " ")))
+		}
 		parts := strings.Split(match[1], ".")
 		if len(parts) > 1 {
 			fn.Schema = parts[0]
@@ -941,11 +961,26 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 		}
 	}
 
+	// A unique column the target cannot mark inline gets a constraint of its
+	// own, where the prefix length MySQL requires can be written.
+	for _, col := range table.Columns {
+		if !col.IsUnique || inlinePKCols[col.Name] {
+			continue
+		}
+		if !unboundedKeyTypes[mysqlBaseType(m.resolveType(col))] {
+			continue
+		}
+		tableConstraints = append(tableConstraints, sqlmapper.Constraint{
+			Type:    "UNIQUE",
+			Columns: []string{col.Name},
+		})
+	}
+
 	totalItems := len(table.Columns) + len(tableConstraints)
 
 	for i, col := range table.Columns {
 		result.WriteString("    ")
-		result.WriteString(m.generateColumnSQL(col, inlinePKCols[col.Name]))
+		result.WriteString(m.generateColumnSQL(col, inlinePKCols[col.Name], sqlmapper.HasUniqueConstraint(tableConstraints, col.Name)))
 		if i < totalItems-1 {
 			result.WriteString(",")
 		}
@@ -968,7 +1003,7 @@ func (m *MySQL) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Con
 // generateColumnSQL creates the SQL for a single column, applying type mapping.
 // inlinePK reports whether this column should carry the PRIMARY KEY marker itself;
 // when the table emits an explicit PK constraint it must not, or MySQL sees two.
-func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK bool) string {
+func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK, hasUnique bool) string {
 	var parts []string
 	parts = append(parts, column.Name)
 
@@ -988,7 +1023,10 @@ func (m *MySQL) generateColumnSQL(column sqlmapper.Column, inlinePK bool) string
 		parts = append(parts, "DEFAULT", dv)
 	}
 
-	if column.IsUnique && !inlinePK {
+	// An unbounded column cannot carry UNIQUE inline: MySQL refuses to index a
+	// TEXT or BLOB without a prefix length, and there is nowhere to write one
+	// here. The table-level constraint carries it instead.
+	if column.IsUnique && !inlinePK && !hasUnique && !unboundedKeyTypes[mysqlBaseType(mysqlType)] {
 		parts = append(parts, "UNIQUE")
 	}
 
@@ -1048,6 +1086,12 @@ func (m *MySQL) resolveType(col sqlmapper.Column) string {
 	// MySQL has no array type; JSON is the closest lossless container.
 	if col.IsArray {
 		return "JSON"
+	}
+
+	// A column typed by a user-defined enum carries the type's name, which means
+	// nothing here, and its values, which do.
+	if len(col.EnumValues) > 0 && lower != "set" {
+		lower = "enum"
 	}
 
 	// ENUM/SET get special treatment to preserve values
@@ -1218,13 +1262,22 @@ func (m *MySQL) routines(schema *sqlmapper.Schema) []string {
 		if fn.IsProc {
 			kw, tail = "PROCEDURE", ""
 		}
+		// MySQL refuses to create a function with none of DETERMINISTIC, NO SQL
+		// or READS SQL DATA while binary logging is on, so what the source
+		// stated is written back.
+		if len(fn.Attributes) > 0 {
+			tail += "\n" + strings.Join(fn.Attributes, "\n")
+		}
+		// The parser captures what is between BEGIN and END, so they have to be
+		// put back: a body written without them declares a variable where the
+		// server expects a statement and the routine does not compile.
 		out = append(out, fmt.Sprintf("CREATE %s %s(%s)%s\n%s",
-			kw, fn.Name, routine.Params(fn.Parameters), tail, strings.TrimSpace(fn.Body)))
+			kw, fn.Name, routine.Params(fn.Parameters), tail, sqlfmt.BlockBody(fn.Body)))
 	}
 
 	for _, pr := range schema.Procedures {
 		out = append(out, fmt.Sprintf("CREATE PROCEDURE %s(%s)\n%s",
-			pr.Name, routine.Params(pr.Parameters), strings.TrimSpace(pr.Body)))
+			pr.Name, routine.Params(pr.Parameters), sqlfmt.BlockBody(pr.Body)))
 	}
 
 	for _, tr := range schema.Triggers {

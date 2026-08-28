@@ -60,3 +60,23 @@ func TestUpperASCII(t *testing.T) {
 		}
 	}
 }
+
+func TestBlankStringLiterals(t *testing.T) {
+	tests := map[string]string{
+		"`email` varchar(255) NOT NULL COMMENT 'login address, unique'": "`email` varchar(255) NOT NULL COMMENT '                     '",
+		"a INT DEFAULT 'x'":     "a INT DEFAULT ' '",
+		"a INT":                 "a INT",
+		"a INT DEFAULT 'it''s'": "a INT DEFAULT '     '",
+		"'unterminated":         "'            ",
+	}
+
+	for in, want := range tests {
+		got := BlankStringLiterals(in)
+		if got != want {
+			t.Errorf("BlankStringLiterals(%q) =\n  %q\nwant\n  %q", in, got, want)
+		}
+		if len(got) != len(in) {
+			t.Errorf("BlankStringLiterals(%q) changed the length", in)
+		}
+	}
+}

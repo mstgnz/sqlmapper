@@ -413,6 +413,12 @@ func (s *SQLServer) resolveTypeName(col sqlmapper.Column) string {
 		return "NVARCHAR(MAX)"
 	}
 
+	// A column typed by a user-defined enum carries a name SQL Server does not
+	// know, and it has no enum of its own.
+	if len(col.EnumValues) > 0 {
+		return "NVARCHAR(255)"
+	}
+
 	mapped, ok := toSQLServerType[lower]
 	if !ok {
 		mapped = strings.ToUpper(col.DataType)
@@ -456,7 +462,7 @@ func mssIsNumericType(rendered string) bool {
 }
 
 // generateConstraintSQL renders a table constraint.
-func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
+func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint, table string) string {
 	var sb strings.Builder
 	if c.Name != "" {
 		sb.WriteString("CONSTRAINT ")
@@ -471,13 +477,18 @@ func (s *SQLServer) generateConstraintSQL(c sqlmapper.Constraint) string {
 	case "FOREIGN KEY":
 		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
-		if c.DeleteRule != "" {
-			sb.WriteString(" ON DELETE ")
-			sb.WriteString(c.DeleteRule)
+
+		// SQL Server refuses a cascading action on a key that points at its own
+		// table: "may cause cycles or multiple cascade paths". The key itself is
+		// kept and the action dropped, because a constraint the server will not
+		// create is worse than one that enforces a little less.
+		selfReference := table != "" && strings.EqualFold(table, c.RefTable)
+
+		if rule := mssReferentialAction(c.DeleteRule); rule != "" && !selfReference {
+			sb.WriteString(" ON DELETE " + rule)
 		}
-		if c.UpdateRule != "" {
-			sb.WriteString(" ON UPDATE ")
-			sb.WriteString(c.UpdateRule)
+		if rule := mssReferentialAction(c.UpdateRule); rule != "" && !selfReference {
+			sb.WriteString(" ON UPDATE " + rule)
 		}
 	case "CHECK":
 		fmt.Fprintf(&sb, "CHECK (%s)", expr.Condition(c.CheckExpression, expr.SQLServer))
@@ -560,7 +571,7 @@ func (s *SQLServer) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper
 		parts = append(parts, def)
 	}
 	for _, c := range tableConstraints {
-		if sql := s.generateConstraintSQL(c); sql != "" {
+		if sql := s.generateConstraintSQL(c, table.Name); sql != "" {
 			parts = append(parts, "    "+sql)
 		}
 	}
@@ -921,7 +932,7 @@ func (s *SQLServer) Generate(schema *sqlmapper.Schema) (string, error) {
 	// Foreign keys that close a cycle are added once every table exists.
 	for _, table := range tables {
 		for _, c := range deferredFKs[table.Name] {
-			fmt.Fprintf(s.buf, "ALTER TABLE %s ADD %s;\nGO\n", table.Name, s.generateConstraintSQL(c))
+			fmt.Fprintf(s.buf, "ALTER TABLE %s ADD %s;\nGO\n", table.Name, s.generateConstraintSQL(c, table.Name))
 		}
 	}
 
@@ -1127,7 +1138,8 @@ func (s *SQLServer) parseTablesFromStatement(stmt []byte) error {
 // mssRoutineRe reads a CREATE FUNCTION or CREATE PROCEDURE. The parameter list
 // is optional, because a procedure that takes none is written without one, and
 // the body runs to the end of the batch.
-var mssRoutineRe = regexp.MustCompile(`(?is)CREATE\s+(FUNCTION|PROCEDURE|PROC)\s+([.\w\[\]]+)\s*(?:\((.*?)\))?\s*(?:RETURNS\s+(\w+(?:\s*\([^)]*\))?))?\s+AS\s+(.*)$`)
+var mssRoutineRe = regexp.MustCompile(`(?is)CREATE\s+(FUNCTION|PROCEDURE|PROC)\s+([.\w\[\]]+)` +
+	`\s*(.*?)\s*(?:RETURNS\s+(\w+(?:\s*\([^)]*\))?)\s*)?\bAS\b\s+(.*)$`)
 
 func (s *SQLServer) parseFunctions(statement string) error {
 	matches := mssRoutineRe.FindStringSubmatch(statement)
@@ -1156,9 +1168,11 @@ func (s *SQLServer) parseFunctions(statement string) error {
 			function.Name = unbracketIdent(functionName)
 		}
 
-		// Parse parameters
-		if matches[3] != "" {
-			params := strings.Split(matches[3], ",")
+		// Parse parameters. A procedure may write them without parentheses,
+		// "archive_orders @cutoff DATE", which T-SQL allows and the pattern has
+		// to leave room for.
+		if raw := strings.TrimSpace(strings.Trim(strings.TrimSpace(matches[3]), "()")); raw != "" {
+			params := strings.Split(raw, ",")
 			for _, param := range params {
 				parts := strings.Fields(strings.TrimSpace(param))
 				if len(parts) >= 2 {
@@ -1316,4 +1330,24 @@ func mssParams(params []sqlmapper.Parameter) string {
 func (s *SQLServer) generateViewSQL(view sqlmapper.View) string {
 	body := expr.TranslateViewBody(strings.TrimSuffix(strings.TrimSpace(view.Definition), ";"), expr.SQLServer)
 	return fmt.Sprintf("CREATE VIEW %s AS %s", view.Name, body)
+}
+
+// mssReferentialAction maps a foreign key's rule onto what SQL Server accepts.
+// It has NO ACTION, CASCADE, SET NULL and SET DEFAULT; RESTRICT is what the
+// standard calls the same behaviour as NO ACTION, and writing it produced
+// "Incorrect syntax near the keyword 'RESTRICT'".
+func mssReferentialAction(rule string) string {
+	switch strings.ToUpper(strings.Join(strings.Fields(rule), " ")) {
+	case "":
+		return ""
+	case "RESTRICT", "NO ACTION":
+		return "NO ACTION"
+	case "CASCADE":
+		return "CASCADE"
+	case "SET NULL":
+		return "SET NULL"
+	case "SET DEFAULT":
+		return "SET DEFAULT"
+	}
+	return ""
 }

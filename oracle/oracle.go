@@ -185,6 +185,21 @@ func oracleIntegerWidth(precision int) string {
 	}
 }
 
+// oracleTableCommentRe and oracleColCommentRe read the COMMENT ON statements
+// Oracle writes for a commented schema.
+var (
+	oracleTableCommentRe = regexp.MustCompile(`(?is)^COMMENT\s+ON\s+TABLE\s+([."\w$#]+)\s+IS\s+'((?:[^']|'')*)'`)
+	oracleColCommentRe   = regexp.MustCompile(`(?is)^COMMENT\s+ON\s+COLUMN\s+([."\w$#]+)\.("?[\w$#]+"?)\s+IS\s+'((?:[^']|'')*)'`)
+)
+
+// oracleSequenceNameRe reads the sequence name, quoted and schema-qualified as
+// DBMS_METADATA writes it.
+var oracleSequenceNameRe = regexp.MustCompile(`(?i)CREATE\s+SEQUENCE\s+([."\w$#]+)`)
+
+// oracleOnDeleteRe reads a foreign key's delete rule. Oracle has CASCADE and
+// SET NULL; anything else is its default of NO ACTION and is not written.
+var oracleOnDeleteRe = regexp.MustCompile(`(?is)ON\s+DELETE\s+(CASCADE|SET\s+NULL)`)
+
 // oracleAnonymousConstraintRe matches a table constraint written without a name.
 var oracleAnonymousConstraintRe = regexp.MustCompile(`(?i)^(?:PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CHECK)\b`)
 
@@ -261,6 +276,11 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 		}
 	}
 
+	// COMMENT ON arrives in statements of its own, so the comments are collected
+	// as the statements go by and applied once every table has been read.
+	tableComments := map[string]string{}
+	columnComments := map[string]map[string]string{}
+
 	for _, stmt := range statements {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
@@ -313,6 +333,21 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 			}
 		}
 
+		// COMMENT ON, which Oracle states in a statement of its own. They were
+		// read by nothing, so a commented schema lost every comment.
+		if m := oracleTableCommentRe.FindStringSubmatch(stmt); m != nil {
+			tableComments[unquoteOracleIdent(m[1])] = strings.ReplaceAll(m[2], "''", "'")
+			continue
+		}
+		if m := oracleColCommentRe.FindStringSubmatch(stmt); m != nil {
+			table := unquoteOracleIdent(m[1])
+			if columnComments[table] == nil {
+				columnComments[table] = map[string]string{}
+			}
+			columnComments[table][unquoteOracleIdent(m[2])] = strings.ReplaceAll(m[3], "''", "'")
+			continue
+		}
+
 		// CREATE TRIGGER
 		if strings.HasPrefix(strings.ToUpper(stmt), "CREATE") && strings.Contains(strings.ToUpper(stmt), "TRIGGER") {
 			trigger, err := o.parseCreateTrigger(stmt)
@@ -320,6 +355,20 @@ func (o *Oracle) Parse(content string) (*sqlmapper.Schema, error) {
 				return nil, err
 			}
 			o.schema.Triggers = append(o.schema.Triggers, trigger)
+		}
+	}
+
+	// Apply the comments now that every table is known.
+	for i := range o.schema.Tables {
+		table := &o.schema.Tables[i]
+		if c, ok := tableComments[table.Name]; ok {
+			table.Comment = c
+		}
+		byColumn := columnComments[table.Name]
+		for j := range table.Columns {
+			if c, ok := byColumn[table.Columns[j].Name]; ok {
+				table.Columns[j].Comment = c
+			}
 		}
 	}
 
@@ -420,11 +469,11 @@ func (o *Oracle) parseCreateTable(stmt string) (sqlmapper.Table, error) {
 					}
 					constraint.RefColumns = refCols
 				}
-				// Read the ON DELETE rule
-				if strings.Contains(colDef, "ON DELETE") {
-					if strings.Contains(colDef, "CASCADE") {
-						constraint.DeleteRule = "CASCADE"
-					}
+				// Read the ON DELETE rule. Only CASCADE was recognised, so a key
+				// declared ON DELETE SET NULL came across with no rule at all
+				// and the target enforced a restriction the source did not.
+				if m := oracleOnDeleteRe.FindStringSubmatch(colDef); m != nil {
+					constraint.DeleteRule = strings.ToUpper(strings.Join(strings.Fields(m[1]), " "))
 				}
 			} else if strings.Contains(colDef, "UNIQUE") {
 				constraint.Type = "UNIQUE"
@@ -550,14 +599,11 @@ func (o *Oracle) parseCreateSequence(stmt string) (sqlmapper.Sequence, error) {
 	seq := sqlmapper.Sequence{StartValue: 1, IncrementBy: 1}
 
 	// Read the sequence name, which may be schema-qualified.
-	seqNameRegex := regexp.MustCompile(`(?i)CREATE\s+SEQUENCE\s+([.\w]+)`)
-	matches := seqNameRegex.FindStringSubmatch(stmt)
+	// DBMS_METADATA quotes and schema-qualifies the name, and matching only \w
+	// found nothing at all in a real dump.
+	matches := oracleSequenceNameRe.FindStringSubmatch(stmt)
 	if len(matches) > 1 {
-		seq.Name = matches[1]
-		if parts := strings.Split(seq.Name, "."); len(parts) > 1 {
-			seq.Schema = parts[0]
-			seq.Name = parts[1]
-		}
+		seq.Schema, seq.Name = splitOracleQualifiedName(matches[1])
 	}
 
 	// Read the options. Each is matched on its own because Oracle does not fix
@@ -741,6 +787,13 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 
 		// Build the indexes
 		for _, index := range table.Indexes {
+			// Oracle builds an index for a unique or primary key of its own, so
+			// one over the same columns is a duplicate it refuses to create:
+			// ORA-01408. A source that declares both, which PostgreSQL allows,
+			// otherwise produced a script that stopped there.
+			if oracleIndexIsRedundant(table, index) {
+				continue
+			}
 			result.WriteString(o.generateIndexSQL(table.Name, index))
 			result.WriteString(";\n")
 		}
@@ -1009,6 +1062,13 @@ func (o *Oracle) resolveTypeName(col sqlmapper.Column) string {
 		return "CLOB"
 	}
 
+	// A column typed by a user-defined enum carries a name Oracle does not
+	// know. Oracle has no enum, so the values live in a bounded string; the
+	// check constraint that would enforce them is not invented here.
+	if len(col.EnumValues) > 0 {
+		return "VARCHAR2(255)"
+	}
+
 	mapped, ok := toOracleType[lower]
 	if !ok {
 		// Already an Oracle type, or something we do not know: pass it through.
@@ -1026,7 +1086,7 @@ func (o *Oracle) resolveTypeName(col sqlmapper.Column) string {
 
 // generateColumnSQL renders one column. inlinePK reports whether this column
 // carries the PRIMARY KEY marker itself.
-func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey bool) string {
+func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey, hasUnique bool) string {
 	oracleType := o.resolveTypeForKey(col, isKey)
 	sql := col.Name + " " + oracleType
 
@@ -1049,7 +1109,9 @@ func (o *Oracle) generateColumnSQL(col sqlmapper.Column, inlinePK, isKey bool) s
 	} else if !col.IsNullable && !col.AutoIncrement {
 		sql += " NOT NULL"
 	}
-	if col.IsUnique && !inlinePK {
+	// A UNIQUE constraint over the same column is the same key, and writing
+	// both declares it twice: Oracle answers ORA-02261.
+	if col.IsUnique && !inlinePK && !hasUnique {
 		sql += " UNIQUE"
 	}
 
@@ -1174,7 +1236,7 @@ func (o *Oracle) generateTableSQL(table sqlmapper.Table, deferred []sqlmapper.Co
 
 	parts := make([]string, 0, len(table.Columns)+len(tableConstraints))
 	for _, col := range table.Columns {
-		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name], keyCols[col.Name]))
+		parts = append(parts, "    "+o.generateColumnSQL(col, inlinePKCols[col.Name], keyCols[col.Name], sqlmapper.HasUniqueConstraint(tableConstraints, col.Name)))
 	}
 	for _, c := range tableConstraints {
 		if sql := o.generateConstraintSQL(c); sql != "" {
@@ -1444,4 +1506,37 @@ func oracleDefaultValue(rest string) string {
 	}
 
 	return strings.Fields(rest)[0]
+}
+
+// oracleIndexIsRedundant reports whether a key already indexes exactly the
+// columns an index names.
+func oracleIndexIsRedundant(table sqlmapper.Table, index sqlmapper.Index) bool {
+	for _, c := range table.Constraints {
+		switch c.Type {
+		case "PRIMARY KEY", "UNIQUE":
+			if sameColumns(c.Columns, index.Columns) {
+				return true
+			}
+		}
+	}
+	for _, col := range table.Columns {
+		if (col.IsPrimaryKey || col.IsUnique) && sameColumns([]string{col.Name}, index.Columns) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameColumns reports whether two column lists name the same columns in the
+// same order.
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }

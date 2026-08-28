@@ -210,7 +210,47 @@ func (p *PostgreSQL) Parse(content string) (*sqlmapper.Schema, error) {
 		return nil, fmt.Errorf("error parsing permissions: %v", err)
 	}
 
+	// A column declared as a user-defined enum carries only the type's name,
+	// which means nothing to a target that has no such type. The values are in
+	// the schema, so the column is resolved to the enum every generator already
+	// knows how to write.
+	p.resolveEnumColumns()
+
 	return p.schema, nil
+}
+
+// resolveEnumColumns turns a column typed by a CREATE TYPE ... AS ENUM into an
+// enum column carrying its values.
+func (p *PostgreSQL) resolveEnumColumns() {
+	enums := map[string][]string{}
+	for _, t := range p.schema.Types {
+		if !strings.EqualFold(t.Kind, "ENUM") {
+			continue
+		}
+		var values []string
+		for _, v := range strings.Split(t.Definition, ",") {
+			if v = strings.Trim(strings.TrimSpace(v), "'"); v != "" {
+				values = append(values, v)
+			}
+		}
+		enums[strings.ToLower(t.Name)] = values
+	}
+	if len(enums) == 0 {
+		return
+	}
+
+	for i := range p.schema.Tables {
+		for j := range p.schema.Tables[i].Columns {
+			col := &p.schema.Tables[i].Columns[j]
+			if values, ok := enums[strings.ToLower(col.DataType)]; ok {
+				// The name stays, so a PostgreSQL target keeps referring to the
+				// type the source declared rather than inventing another one.
+				// The values travel with it for the targets that have no such
+				// type and need to write them out.
+				col.EnumValues = values
+			}
+		}
+	}
 }
 
 // Generate creates PostgreSQL SQL from a schema structure.
@@ -621,26 +661,9 @@ func extractBalancedParens(s string, openIdx int) (string, int) {
 
 // parseColumnsAndConstraints splits a CREATE TABLE body and processes each part.
 func (p *PostgreSQL) parseColumnsAndConstraints(columnDefs string, table *sqlmapper.Table) error {
-	defs := strings.Split(columnDefs, ",")
-	var finalDefs []string
-	var current strings.Builder
-	parenCount := 0
-
-	for _, def := range defs {
-		parenCount += strings.Count(def, "(") - strings.Count(def, ")")
-		if parenCount > 0 {
-			current.WriteString(def)
-			current.WriteString(",")
-		} else {
-			if current.Len() > 0 {
-				current.WriteString(def)
-				finalDefs = append(finalDefs, current.String())
-				current.Reset()
-			} else {
-				finalDefs = append(finalDefs, def)
-			}
-		}
-	}
+	// Splitting on every comma and rejoining by parenthesis depth cut a
+	// definition in half at a comma inside a string literal.
+	finalDefs := sqlfmt.SplitTopLevelCommas(columnDefs)
 
 	for _, def := range finalDefs {
 		def = strings.TrimSpace(def)
@@ -753,6 +776,12 @@ func takeUntilStopWord(s string, stop map[string]bool) string {
 // normalizePGTypeName folds PostgreSQL's spelled-out type names onto the short
 // names the schema model uses.
 func normalizePGTypeName(name string) string {
+	// A user-defined type is written schema-qualified, "public.order_status",
+	// and the qualifier is not part of the type's name: the type is created as
+	// order_status, and carrying the prefix sent "PUBLIC.ORDER_STATUS" into
+	// targets that have no such schema and no such type.
+	name = stripSchemaPrefix(strings.TrimSpace(name))
+
 	n := strings.ToLower(strings.Join(strings.Fields(name), " "))
 	switch n {
 	case "character varying":
@@ -1096,9 +1125,8 @@ func (p *PostgreSQL) parseFunctions(content string) error {
 		}
 		if params != "" {
 			for _, param := range strings.Split(params, ",") {
-				pp := strings.Fields(strings.TrimSpace(param))
-				if len(pp) >= 2 {
-					fn.Parameters = append(fn.Parameters, sqlmapper.Parameter{Name: pp[0], DataType: pp[1]})
+				if p, ok := pgParameter(param); ok {
+					fn.Parameters = append(fn.Parameters, p)
 				}
 			}
 		}
@@ -1118,9 +1146,8 @@ func (p *PostgreSQL) parseFunctions(content string) error {
 		}
 		if m[2] != "" {
 			for _, param := range strings.Split(m[2], ",") {
-				pp := strings.Fields(strings.TrimSpace(param))
-				if len(pp) >= 2 {
-					fn.Parameters = append(fn.Parameters, sqlmapper.Parameter{Name: pp[0], DataType: pp[1]})
+				if pp, ok := pgParameter(param); ok {
+					fn.Parameters = append(fn.Parameters, pp)
 				}
 			}
 		}
@@ -1435,14 +1462,14 @@ func (p *PostgreSQL) resolveType(col sqlmapper.Column, tableName string) string 
 func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 	var sb strings.Builder
 	if c.Name != "" {
-		sb.WriteString(fmt.Sprintf("CONSTRAINT %s ", c.Name))
+		fmt.Fprintf(&sb, "CONSTRAINT %s ", c.Name)
 	}
 	switch c.Type {
 	case "PRIMARY KEY":
-		sb.WriteString(fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "PRIMARY KEY (%s)", strings.Join(c.Columns, ", "))
 	case "FOREIGN KEY":
-		sb.WriteString(fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
-			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", ")))
+		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
 		if c.DeleteRule != "" {
 			sb.WriteString(" ON DELETE ")
 			sb.WriteString(c.DeleteRule)
@@ -1452,9 +1479,9 @@ func (p *PostgreSQL) generateConstraintSQL(c sqlmapper.Constraint) string {
 			sb.WriteString(c.UpdateRule)
 		}
 	case "UNIQUE":
-		sb.WriteString(fmt.Sprintf("UNIQUE (%s)", strings.Join(c.Columns, ", ")))
+		fmt.Fprintf(&sb, "UNIQUE (%s)", strings.Join(c.Columns, ", "))
 	case "CHECK":
-		sb.WriteString(fmt.Sprintf("CHECK (%s)", expr.Condition(c.CheckExpression, expr.PostgreSQL)))
+		fmt.Fprintf(&sb, "CHECK (%s)", expr.Condition(c.CheckExpression, expr.PostgreSQL))
 	}
 	return sb.String()
 }
@@ -1694,4 +1721,31 @@ func pgIsNumericType(rendered string) bool {
 		return true
 	}
 	return false
+}
+
+// pgParameter reads one routine parameter. PostgreSQL writes the direction
+// before the name, "IN cutoff date", and reading the first two words as name
+// and type made the direction the name and the name the type, so the procedure
+// came out declaring a parameter of type cutoff.
+func pgParameter(param string) (sqlmapper.Parameter, bool) {
+	fields := strings.Fields(strings.TrimSpace(param))
+	if len(fields) == 0 {
+		return sqlmapper.Parameter{}, false
+	}
+
+	var direction string
+	switch strings.ToUpper(fields[0]) {
+	case "IN", "OUT", "INOUT", "VARIADIC":
+		direction = strings.ToUpper(fields[0])
+		fields = fields[1:]
+	}
+	if len(fields) < 2 {
+		return sqlmapper.Parameter{}, false
+	}
+
+	return sqlmapper.Parameter{
+		Name:      fields[0],
+		Direction: direction,
+		DataType:  strings.Join(fields[1:], " "),
+	}, true
 }

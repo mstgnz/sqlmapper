@@ -164,8 +164,11 @@ func (s *SQLite) parseCreateTable(stmt []byte) (sqlmapper.Table, error) {
 			continue
 		}
 
-		if column, ok := parseSQLiteColumn(colDef); ok {
+		if column, inlineFK, ok := parseSQLiteColumn(colDef); ok {
 			table.Columns = append(table.Columns, column)
+			if inlineFK != nil {
+				table.Constraints = append(table.Constraints, *inlineFK)
+			}
 		}
 	}
 
@@ -230,14 +233,14 @@ func parseSQLiteTableConstraint(def []byte) (sqlmapper.Constraint, bool) {
 }
 
 // parseSQLiteColumn reads one column definition.
-func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
+func parseSQLiteColumn(def []byte) (column sqlmapper.Column, inlineFK *sqlmapper.Constraint, ok bool) {
 	fields := bytes.Fields(def)
 	if len(fields) < 2 {
-		return sqlmapper.Column{}, false
+		return sqlmapper.Column{}, nil, false
 	}
 
 	upper := bytes.ToUpper(def)
-	column := sqlmapper.Column{
+	column = sqlmapper.Column{
 		Name:          string(bytes.Trim(fields[0], "`\"[]")),
 		DataType:      string(bytes.ToUpper(fields[1])),
 		IsNullable:    !bytes.Contains(upper, []byte("NOT NULL")),
@@ -261,6 +264,25 @@ func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
 
 	column.DefaultValue = sqliteDefaultValue(def)
 
+	// A column may carry its own foreign key, "referred_by INTEGER REFERENCES
+	// customers(id) ON DELETE SET NULL". Only the table-level form was read, so
+	// an inline reference was lost.
+	if m := sqliteInlineFKRe.FindSubmatch(def); m != nil {
+		fk := sqlmapper.Constraint{
+			Type:       "FOREIGN KEY",
+			Columns:    []string{column.Name},
+			RefTable:   strings.Trim(string(m[1]), "`\"[]"),
+			RefColumns: splitAndTrimNames(string(m[2])),
+		}
+		if r := sqliteOnDelRe.FindSubmatch(m[3]); r != nil {
+			fk.DeleteRule = strings.ToUpper(strings.Join(strings.Fields(string(r[1])), " "))
+		}
+		if r := sqliteOnUpdRe.FindSubmatch(m[3]); r != nil {
+			fk.UpdateRule = strings.ToUpper(strings.Join(strings.Fields(string(r[1])), " "))
+		}
+		inlineFK = &fk
+	}
+
 	// A column may carry its own CHECK, "meta TEXT CHECK (json_valid(meta))".
 	// Matching only a definition that is nothing but a CHECK meant a column
 	// constraint was read as no constraint at all.
@@ -268,7 +290,7 @@ func parseSQLiteColumn(def []byte) (sqlmapper.Column, bool) {
 		column.CheckExpression = strings.TrimSpace(string(m[1]))
 	}
 
-	return column, true
+	return column, inlineFK, true
 }
 
 // sqliteDefaultValue reads what follows DEFAULT, which may be a quoted string, a
@@ -337,6 +359,9 @@ func splitAndTrimNames(list string) []string {
 
 // sqliteIndexHeaderRe reads the index name and target table out of a CREATE
 // INDEX header, tolerating the optional UNIQUE and IF NOT EXISTS keywords.
+// sqliteIndexWhereRe captures the condition of a partial index.
+var sqliteIndexWhereRe = regexp.MustCompile(`(?is)\)\s*WHERE\s+(.+?)\s*;?\s*$`)
+
 var sqliteIndexHeaderRe = regexp.MustCompile(`(?i)CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `"\[\].\w]+)\s+ON\s+([` + "`" + `"\[\].\w]+)`)
 
 // parseCreateIndex parses a CREATE INDEX statement and adds the index to the appropriate table.
@@ -368,13 +393,22 @@ func (s *SQLite) parseCreateIndex(stmt []byte) error {
 
 	columns := s.splitAndTrim(string(bytes.TrimSpace(stmt[startIdx+1 : endIdx])))
 
+	// SQLite indexes can be partial. The WHERE clause was read by nothing, so a
+	// partial index came across as a full one, which indexes rows the source
+	// deliberately left out.
+	var condition string
+	if m := sqliteIndexWhereRe.FindSubmatch(stmt); m != nil {
+		condition = strings.TrimSpace(string(m[1]))
+	}
+
 	// Find the table and add the index
 	for i, table := range s.schema.Tables {
 		if table.Name == tableName {
 			s.schema.Tables[i].Indexes = append(s.schema.Tables[i].Indexes, sqlmapper.Index{
-				Name:     indexName,
-				Columns:  columns,
-				IsUnique: isUnique,
+				Name:      indexName,
+				Columns:   columns,
+				IsUnique:  isUnique,
+				Condition: condition,
 			})
 			return nil
 		}
@@ -550,7 +584,9 @@ func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Co
 
 	for _, col := range table.Columns {
 		var def strings.Builder
-		def.WriteString("    " + col.Name + " ")
+		def.WriteString("    ")
+		def.WriteString(col.Name)
+		def.WriteString(" ")
 
 		if col.Name == rowidAlias {
 			def.WriteString("INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -570,10 +606,13 @@ func (s *SQLite) generateTableSQL(table sqlmapper.Table, extraFKs []sqlmapper.Co
 			def.WriteString(" UNIQUE")
 		}
 		if lit := sqliteDefaultLiteral(col.DefaultValue, sqliteColumnType(col)); lit != "" {
-			def.WriteString(" DEFAULT " + lit)
+			def.WriteString(" DEFAULT ")
+			def.WriteString(lit)
 		}
 		if col.CheckExpression != "" {
-			def.WriteString(" CHECK (" + expr.Condition(col.CheckExpression, expr.SQLite) + ")")
+			def.WriteString(" CHECK (")
+			def.WriteString(expr.Condition(col.CheckExpression, expr.SQLite))
+			def.WriteString(")")
 		}
 		parts = append(parts, def.String())
 	}
@@ -815,6 +854,12 @@ func sqliteColumnType(col sqlmapper.Column) string {
 		return "TEXT"
 	}
 
+	// A column typed by a user-defined enum carries a name SQLite has never
+	// heard of. It has no enum either, so the values live in text.
+	if len(col.EnumValues) > 0 {
+		return "TEXT"
+	}
+
 	name := strings.ToLower(strings.Join(strings.Fields(col.DataType), " "))
 	if i := strings.Index(name, "("); i > 0 {
 		name = strings.TrimSpace(name[:i])
@@ -852,10 +897,12 @@ func (s *SQLite) generateConstraintSQL(c sqlmapper.Constraint) string {
 		fmt.Fprintf(&sb, "FOREIGN KEY (%s) REFERENCES %s (%s)",
 			strings.Join(c.Columns, ", "), c.RefTable, strings.Join(c.RefColumns, ", "))
 		if c.DeleteRule != "" {
-			sb.WriteString(" ON DELETE " + c.DeleteRule)
+			sb.WriteString(" ON DELETE ")
+			sb.WriteString(c.DeleteRule)
 		}
 		if c.UpdateRule != "" {
-			sb.WriteString(" ON UPDATE " + c.UpdateRule)
+			sb.WriteString(" ON UPDATE ")
+			sb.WriteString(c.UpdateRule)
 		}
 	case "UNIQUE":
 		fmt.Fprintf(&sb, "UNIQUE (%s)", strings.Join(c.Columns, ", "))
@@ -951,6 +998,10 @@ func sqliteDefaultLiteral(value, columnType string) string {
 
 	return expr.DefaultLiteral(value, expr.SQLite, expr.DefaultOptions{NumericColumn: numeric})
 }
+
+// sqliteInlineFKRe captures a foreign key written on the column rather than at
+// the end of the table.
+var sqliteInlineFKRe = regexp.MustCompile(`(?is)\bREFERENCES\s+([` + "`" + `"\[\].\w]+)\s*\(([^)]*)\)(.*)$`)
 
 // sqliteColumnCheckRe captures the body of a CHECK written on a column.
 var sqliteColumnCheckRe = regexp.MustCompile(`(?is)\bCHECK\s*\(((?:[^()]|\([^()]*\))*)\)`)
