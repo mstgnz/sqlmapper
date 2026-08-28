@@ -165,6 +165,27 @@ func (p *PostgreSQLStreamParser) ParseStream(reader io.Reader, callback func(str
 			continue
 		}
 
+		// Parse ALTER TABLE ... ADD CONSTRAINT statements. pg_dump writes every
+		// primary key, unique and foreign key this way, and with no branch for
+		// them a streamed dump kept none of its keys.
+		if strings.HasPrefix(dispatch, "ALTER TABLE") {
+			constraint, err := p.parseConstraintStatement(statement)
+			if err != nil {
+				// An ALTER TABLE that adds no constraint is not this parser's
+				// business, and is no reason to end the stream.
+				continue
+			}
+
+			err = callback(stream.SchemaObject{
+				Type: stream.ConstraintObject,
+				Data: constraint,
+			})
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
 		// Parse GRANT/REVOKE statements
 		if strings.HasPrefix(dispatch, "GRANT") ||
 			strings.HasPrefix(dispatch, "REVOKE") {
@@ -613,4 +634,37 @@ var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
 // once here rather than doubling every case in the dispatch.
 func dispatchKey(statement string) string {
 	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
+}
+
+// parseConstraintStatement reads one ALTER TABLE ... ADD CONSTRAINT.
+//
+// The whole-file parser attaches the constraint to a table it has already read,
+// which a stream cannot do: the table was handed to the caller and forgotten.
+// The constraint is reported on its own instead, the way an index is.
+func (p *PostgreSQLStreamParser) parseConstraintStatement(statement string) (*sqlmapper.Constraint, error) {
+	stmt := ensureTerminated(statement)
+
+	m := pgAlterTableRe.FindStringSubmatch(stmt)
+	if m == nil {
+		return nil, fmt.Errorf("no constraint found in statement")
+	}
+
+	// The parser looks the table up by name, so it has to find one.
+	name := strings.Trim(m[1], `"`)
+	if parts := strings.Split(name, "."); len(parts) > 1 {
+		name = strings.Trim(parts[1], `"`)
+	}
+
+	localParser := &PostgreSQL{schema: &sqlmapper.Schema{
+		Tables: []sqlmapper.Table{{Name: name}},
+	}}
+	if err := localParser.parseAlterTableConstraints(stmt); err != nil {
+		return nil, err
+	}
+
+	constraints := localParser.schema.Tables[0].Constraints
+	if len(constraints) == 0 {
+		return nil, fmt.Errorf("no constraint found in statement")
+	}
+	return &constraints[0], nil
 }

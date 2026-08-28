@@ -759,109 +759,18 @@ func (o *Oracle) Generate(schema *sqlmapper.Schema) (string, error) {
 	return result.String(), nil
 }
 
-func (o *Oracle) parseTables(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+TABLE\s+([.\w]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+(\w+))?`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 2 {
-		tableName := matches[1]
-		columnDefs := matches[2]
-
-		table := sqlmapper.Table{}
-
-		// Parse schema if exists
-		parts := strings.Split(tableName, ".")
-		if len(parts) > 1 {
-			table.Schema = parts[0]
-			table.Name = parts[1]
-		} else {
-			table.Name = tableName
-		}
-
-		// Parse tablespace if exists
-		if len(matches) > 3 && matches[3] != "" {
-			table.TableSpace = matches[3]
-		}
-
-		// Parse columns and constraints
-		columns := strings.Split(columnDefs, ",")
-		for _, col := range columns {
-			col = strings.TrimSpace(col)
-			if strings.HasPrefix(strings.ToUpper(col), "CONSTRAINT") {
-				continue // Skip constraints for now
-			}
-
-			parts := strings.Fields(col)
-			if len(parts) < 2 {
-				continue
-			}
-
-			column := sqlmapper.Column{
-				Name:       parts[0],
-				DataType:   parts[1],
-				IsNullable: true,
-			}
-
-			// Parse length/precision
-			if strings.Contains(column.DataType, "(") {
-				re := regexp.MustCompile(`(\w+)\((\d+)(?:,(\d+))?\)`)
-				if matches := re.FindStringSubmatch(column.DataType); len(matches) > 2 {
-					column.DataType = matches[1]
-					column.Length = atoi(matches[2])
-					if len(matches) > 3 && matches[3] != "" {
-						column.Scale = atoi(matches[3])
-					}
-				}
-			}
-
-			// Parse constraints
-			if strings.Contains(strings.ToUpper(col), "NOT NULL") {
-				column.IsNullable = false
-			}
-			if strings.Contains(strings.ToUpper(col), "PRIMARY KEY") {
-				column.IsPrimaryKey = true
-			}
-			if strings.Contains(strings.ToUpper(col), "UNIQUE") {
-				column.IsUnique = true
-			}
-			if strings.Contains(strings.ToUpper(col), "DEFAULT") {
-				re := regexp.MustCompile(`DEFAULT\s+([^,\s]+)`)
-				if matches := re.FindStringSubmatch(col); len(matches) > 1 {
-					column.DefaultValue = matches[1]
-				}
-			}
-
-			table.Columns = append(table.Columns, column)
-		}
-
-		o.schema.Tables = append(o.schema.Tables, table)
+// parseTablesFromStatement reads one CREATE TABLE with the same code the file
+// parser uses. The stream path had a second implementation of its own, and on
+// real DBMS_METADATA output it failed outright.
+//
+// Statements are collapsed onto one line first, because the patterns below the
+// file parser were written against that form.
+func (o *Oracle) parseTablesFromStatement(statement string) error {
+	table, err := o.parseCreateTable(strings.Join(strings.Fields(statement), " "))
+	if err != nil {
+		return err
 	}
-
-	return nil
-}
-
-func (o *Oracle) parseViews(statement string) error {
-	re := regexp.MustCompile(`CREATE(?:\s+OR\s+REPLACE)?\s+VIEW\s+([.\w]+)\s+AS\s+(.*?)(?:WITH\s+READ\s+ONLY)?$`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 2 {
-		viewName := matches[1]
-		view := sqlmapper.View{
-			Definition: matches[2],
-		}
-
-		// Parse schema if exists
-		parts := strings.Split(viewName, ".")
-		if len(parts) > 1 {
-			view.Schema = parts[0]
-			view.Name = parts[1]
-		} else {
-			view.Name = viewName
-		}
-
-		o.schema.Views = append(o.schema.Views, view)
-	}
-
+	o.schema.Tables = append(o.schema.Tables, table)
 	return nil
 }
 

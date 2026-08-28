@@ -261,3 +261,32 @@ func TestPostgreSQLStreamParser_SerialAndParallelAgree(t *testing.T) {
 		})
 	}
 }
+
+// pg_dump writes every primary key, unique and foreign key as its own ALTER
+// TABLE. The stream had no branch for them, so a streamed dump kept none of its
+// keys.
+func TestPostgreSQLStreamParser_AlterTableConstraints(t *testing.T) {
+	const dump = `CREATE TABLE public.users (id bigint NOT NULL, email character varying(255));
+ALTER TABLE ONLY public.users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.users ADD CONSTRAINT users_email_key UNIQUE (email);
+ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_user_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE public.users OWNER TO app;
+`
+
+	var got []*sqlmapper.Constraint
+	err := NewPostgreSQLStreamParser().ParseStream(strings.NewReader(dump), func(obj stream.SchemaObject) error {
+		if c, ok := obj.Data.(*sqlmapper.Constraint); ok {
+			got = append(got, c)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, got, 3, "OWNER TO adds no constraint and is not an error")
+
+	assert.Equal(t, "PRIMARY KEY", got[0].Type)
+	assert.Equal(t, []string{"id"}, got[0].Columns)
+	assert.Equal(t, "UNIQUE", got[1].Type)
+	assert.Equal(t, "FOREIGN KEY", got[2].Type)
+	assert.Equal(t, "users", got[2].RefTable)
+	assert.Equal(t, "CASCADE", got[2].DeleteRule)
+}

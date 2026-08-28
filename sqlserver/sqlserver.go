@@ -1111,116 +1111,15 @@ func (s *SQLServer) parseCreateTrigger(stmt []byte) (sqlmapper.Trigger, error) {
 	return trigger, nil
 }
 
-func (s *SQLServer) parseTables(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+TABLE\s+([.\w\[\]]+)\s*\((.*?)\)(?:\s+ON\s+(\w+))?`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 2 {
-		tableName := matches[1]
-		columnDefs := matches[2]
-
-		table := sqlmapper.Table{}
-
-		// Parse schema if exists
-		parts := strings.Split(strings.Trim(tableName, "[]"), ".")
-		if len(parts) > 1 {
-			table.Schema = parts[0]
-			table.Name = parts[1]
-		} else {
-			table.Name = tableName
-		}
-
-		// Parse filegroup if exists
-		if len(matches) > 3 && matches[3] != "" {
-			table.TableSpace = matches[3]
-		}
-
-		// Parse columns and constraints
-		columns := strings.Split(columnDefs, ",")
-		for _, col := range columns {
-			col = strings.TrimSpace(col)
-			if strings.HasPrefix(strings.ToUpper(col), "CONSTRAINT") {
-				continue // Skip constraints for now
-			}
-
-			parts := strings.Fields(col)
-			if len(parts) < 2 {
-				continue
-			}
-
-			column := sqlmapper.Column{
-				Name:       strings.Trim(parts[0], "[]"),
-				DataType:   parts[1],
-				IsNullable: true,
-			}
-
-			// Parse length/precision
-			if strings.Contains(column.DataType, "(") {
-				re := regexp.MustCompile(`(\w+)\((\d+|MAX)(?:,(\d+))?\)`)
-				if matches := re.FindStringSubmatch(column.DataType); len(matches) > 2 {
-					column.DataType = matches[1]
-					if matches[2] == "MAX" {
-						column.Length = -1
-					} else {
-						column.Length = atoi(matches[2])
-					}
-					if len(matches) > 3 && matches[3] != "" {
-						column.Scale = atoi(matches[3])
-					}
-				}
-			}
-
-			// Parse constraints
-			if strings.Contains(strings.ToUpper(col), "NOT NULL") {
-				column.IsNullable = false
-			}
-			if strings.Contains(strings.ToUpper(col), "PRIMARY KEY") {
-				column.IsPrimaryKey = true
-			}
-			if strings.Contains(strings.ToUpper(col), "IDENTITY") {
-				column.AutoIncrement = true
-			}
-			if strings.Contains(strings.ToUpper(col), "UNIQUE") {
-				column.IsUnique = true
-			}
-			if strings.Contains(strings.ToUpper(col), "DEFAULT") {
-				re := regexp.MustCompile(`DEFAULT\s+([^,\s]+)`)
-				if matches := re.FindStringSubmatch(col); len(matches) > 1 {
-					column.DefaultValue = matches[1]
-				}
-			}
-
-			table.Columns = append(table.Columns, column)
-		}
-
-		s.schema.Tables = append(s.schema.Tables, table)
+// parseTablesFromStatement reads one CREATE TABLE with the same code the file
+// parser uses. The stream path had a second implementation of its own, and on a
+// real SSMS script it left the brackets on every name and found one column.
+func (s *SQLServer) parseTablesFromStatement(stmt []byte) error {
+	table, err := s.parseCreateTable(stmt)
+	if err != nil {
+		return err
 	}
-
-	return nil
-}
-
-func (s *SQLServer) parseViews(statement string) error {
-	re := regexp.MustCompile(`CREATE\s+VIEW\s+([.\w\[\]]+)\s+AS\s+(.+)$`)
-	matches := re.FindStringSubmatch(statement)
-
-	if len(matches) > 2 {
-		viewName := matches[1]
-		view := sqlmapper.View{
-			Definition: matches[2],
-		}
-
-		// Parse schema if exists
-		parts := strings.Split(strings.Trim(viewName, "[]"), ".")
-		if len(parts) > 1 {
-			view.Schema = parts[0]
-			view.Name = parts[1]
-		} else {
-			view.Name = viewName
-		}
-
-		s.schema.Views = append(s.schema.Views, view)
-	}
-
+	s.schema.Tables = append(s.schema.Tables, table)
 	return nil
 }
 

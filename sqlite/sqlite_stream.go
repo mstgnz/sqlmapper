@@ -54,6 +54,11 @@ func (p *SQLiteStreamParser) ParseStream(reader io.Reader, callback func(stream.
 			if err != nil {
 				return err
 			}
+			// sqlite_sequence belongs to SQLite rather than to the schema, and
+			// the reader reports nothing for it.
+			if table == nil {
+				continue
+			}
 
 			err = callback(stream.SchemaObject{
 				Type: stream.TableObject,
@@ -200,6 +205,9 @@ func (p *SQLiteStreamParser) parseStatement(statement string) (*stream.SchemaObj
 		if err != nil {
 			return nil, err
 		}
+		if table == nil {
+			return nil, nil // sqlite_sequence belongs to SQLite, not the schema
+		}
 		return &stream.SchemaObject{
 			Type: stream.TableObject,
 			Data: table,
@@ -285,20 +293,22 @@ func (p *SQLiteStreamParser) GenerateStream(schema *sqlmapper.Schema, writer io.
 
 // parseTableStatement parses a CREATE TABLE statement
 func (p *SQLiteStreamParser) parseTableStatement(statement string) (*sqlmapper.Table, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &SQLite{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	// There used to be two implementations of this in the package and they did
+	// not agree: on a real sqlite3 .schema the stream path dropped columns,
+	// split NUMERIC(10,2) at its comma, kept sqlite_sequence and lost every
+	// constraint.
+	localParser := &SQLite{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
+	table, err := localParser.parseCreateTable([]byte(statement))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Tables) == 0 {
-		return nil, fmt.Errorf("no table found in statement")
+	if isSQLiteInternalTable(table.Name) {
+		return nil, nil
 	}
 
-	return &tempSchema.Tables[0], nil
+	return &table, nil
 }
 
 // parseViewStatement parses a CREATE VIEW statement

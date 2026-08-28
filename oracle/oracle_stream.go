@@ -21,7 +21,10 @@ type OracleStreamParser struct {
 // NewOracleStreamParser creates a new Oracle stream parser
 // oracleStreamIndexRe reads a standalone CREATE INDEX statement, which the whole-file
 // parser cannot do because it resolves the target table first.
-var oracleStreamIndexRe = regexp.MustCompile(`(?i)CREATE(?:\s+(UNIQUE)|\s+(BITMAP))?\s+INDEX\s+([.\w]+)\s+ON\s+([.\w]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+(\w+))?`)
+// DBMS_METADATA quotes and schema-qualifies both names, so the character class
+// has to allow the quotes and they are stripped afterwards. Without that a real
+// dump failed the whole stream with "no index found in statement".
+var oracleStreamIndexRe = regexp.MustCompile(`(?i)CREATE(?:\s+(UNIQUE)|\s+(BITMAP))?\s+INDEX\s+([."\w$#]+)\s+ON\s+([."\w$#]+)\s*\((.*?)\)(?:\s+TABLESPACE\s+("?[\w$#]+"?))?`)
 
 func NewOracleStreamParser() *OracleStreamParser {
 	return &OracleStreamParser{
@@ -359,7 +362,7 @@ func (p *OracleStreamParser) parseTableStatement(statement string) (*sqlmapper.T
 	// must not share mutable state through the embedded dialect parser.
 	localParser := &Oracle{schema: tempSchema}
 
-	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
+	if err := localParser.parseTablesFromStatement(statement); err != nil {
 		return nil, err
 	}
 
@@ -372,20 +375,24 @@ func (p *OracleStreamParser) parseTableStatement(statement string) (*sqlmapper.T
 
 // parseViewStatement parses a CREATE VIEW statement
 func (p *OracleStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &Oracle{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	// The stream had its own and it could not read what DBMS_METADATA writes:
+	// CREATE OR REPLACE FORCE EDITIONABLE VIEW with a column list after the
+	// name.
+	localParser := &Oracle{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
+	view, err := localParser.parseCreateView(strings.Join(strings.Fields(statement), " "))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Views) == 0 {
+	// The whole-file parser records whatever it can and moves on. A stream
+	// hands back one object per statement, so a statement it could not read has
+	// to be reported rather than returned empty.
+	if view.Name == "" || view.Definition == "" {
 		return nil, fmt.Errorf("no view found in statement")
 	}
 
-	return &tempSchema.Views[0], nil
+	return &view, nil
 }
 
 // parseFunctionStatement parses a CREATE FUNCTION statement
@@ -507,13 +514,13 @@ func (p *OracleStreamParser) parseIndexStatement(statement string) (*sqlmapper.I
 	}
 
 	index := &sqlmapper.Index{
-		Name:     m[3],
+		Name:     unquoteOracleName(m[3]),
 		Columns:  splitAndTrimColumns(m[5]),
 		IsUnique: strings.TrimSpace(m[1]) != "",
 		IsBitmap: strings.TrimSpace(m[2]) != "",
 	}
 	if len(m) > 6 {
-		index.TableSpace = m[6]
+		index.TableSpace = unquoteOracleName(m[6])
 	}
 	return index, nil
 }
@@ -604,11 +611,21 @@ func splitAndTrimColumns(s string) []string {
 
 // orReplaceRe matches the optional OR REPLACE that sits between CREATE and the
 // object keyword.
-var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
+// DBMS_METADATA writes CREATE OR REPLACE FORCE EDITIONABLE VIEW, so the
+// optional keywords are folded away before the statement is classified. Without
+// FORCE and EDITIONABLE a real dump's views were not recognised at all.
+var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?(?:\s+FORCE|\s+NO\s+FORCE)?(?:\s+(?:NON)?EDITIONABLE)?\s+`)
 
 // dispatchKey normalises a statement for prefix matching. "CREATE OR REPLACE
 // FUNCTION" shifts every fixed prefix, so the optional keywords are folded away
 // once here rather than doubling every case in the dispatch.
 func dispatchKey(statement string) string {
 	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
+}
+
+// unquoteOracleName drops the quotes and any schema qualifier DBMS_METADATA
+// writes around an identifier.
+func unquoteOracleName(raw string) string {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	return unquoteOracleIdent(parts[len(parts)-1])
 }

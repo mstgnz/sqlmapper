@@ -123,9 +123,19 @@ Nested blocks are the exception. A body whose inner block closes with its own
 `END;` ends the statement there, so a routine written that way is still cut
 short.
 
+## The same schema as Parse
+
+`ParseStream` and `Parse` read a dump with the same code and produce the same
+schema. Only the shape differs: the stream hands over one object at a time, and
+an index or a constraint the dump tool wrote as its own statement arrives on its
+own rather than attached to a table.
+
+`tests/integration/stream_agreement_test.go` holds the two side by side for
+every dialect, so a reader that drifts from the other fails the build.
+
 ## Limitations
 
 - **A parser instance holds state.** Use one per goroutine. `ParseStreamParallel` handles this internally, but do not share a parser across your own goroutines.
 - **Errors abort the run.** There is no skip-and-continue mode. One unparseable statement ends the stream.
-- **An index arrives without its table.** `SchemaObject` has no field naming the table an index belongs to, so a consumer that needs the association has to track it from the surrounding statements.
+- **An index or a constraint arrives without its table.** `SchemaObject` has no field naming the table one belongs to, so a consumer that needs the association has to track it from the surrounding statements. This is how a key reaches you when the dump tool writes it separately, which `pg_dump` does for every primary key, unique and foreign key, and SSMS does for foreign keys and checks.
 - **Order is not preserved in parallel mode.** Use `ParseStream` when it matters.

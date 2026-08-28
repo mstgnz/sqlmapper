@@ -77,3 +77,62 @@ func TestPostgreSQL_TaggedFunctionBody(t *testing.T) {
 	assert.Equal(t, "sql", schema.Functions[0].Language)
 	assert.Contains(t, schema.Functions[0].Body, "a $$ b")
 }
+
+func TestPgDollarBody(t *testing.T) {
+	tests := []struct {
+		rest                 string
+		wantBody, wantBefore string
+		wantAfter            string
+		wantOK               bool
+	}{
+		{"integer AS $$ SELECT 1 $$;", " SELECT 1 ", "integer AS ", "", true},
+		{"trigger\n LANGUAGE plpgsql\n AS $$ BEGIN END $$;", " BEGIN END ", "trigger\n LANGUAGE plpgsql\n AS ", "", true},
+		{"integer AS $$ SELECT 1 $$ LANGUAGE sql;", " SELECT 1 ", "integer AS ", " LANGUAGE sql", true},
+		{"text AS $_$ a $$ b $_$;", " a $$ b ", "text AS ", "", true},
+
+		// Nothing that can be read as a body.
+		{"integer AS 'SELECT 1';", "", "", "", false},
+		{"integer", "", "", "", false},
+		{"integer AS $ unterminated", "", "", "", false},
+		// A tag with whitespace in it is not a tag.
+		{"integer AS $not a tag$ x $not a tag$;", "", "", "", false},
+	}
+
+	for _, tt := range tests {
+		body, before, after, ok := pgDollarBody(tt.rest)
+		if ok != tt.wantOK {
+			t.Errorf("pgDollarBody(%q) ok = %v, want %v", tt.rest, ok, tt.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if body != tt.wantBody || before != tt.wantBefore || after != tt.wantAfter {
+			t.Errorf("pgDollarBody(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				tt.rest, body, before, after, tt.wantBody, tt.wantBefore, tt.wantAfter)
+		}
+	}
+}
+
+func TestPgLanguageOf(t *testing.T) {
+	if got := pgLanguageOf(" LANGUAGE sql "); got != "sql" {
+		t.Errorf("got %q", got)
+	}
+	if got := pgLanguageOf("SECURITY DEFINER"); got != "plpgsql" {
+		t.Errorf("an unstated language defaults to plpgsql, got %q", got)
+	}
+}
+
+func TestPgReturnType(t *testing.T) {
+	tests := map[string]string{
+		"trigger\n    LANGUAGE plpgsql\n    ": "trigger",
+		"integer AS ":                         "integer",
+		"SETOF record STABLE ":                "SETOF record",
+		"text ":                               "text",
+	}
+	for in, want := range tests {
+		if got := pgReturnType(in); got != want {
+			t.Errorf("pgReturnType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

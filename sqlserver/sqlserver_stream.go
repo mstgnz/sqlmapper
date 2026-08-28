@@ -1,6 +1,7 @@
 package sqlserver
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"regexp"
@@ -116,6 +117,27 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 			continue
 		}
 
+		// Parse ALTER TABLE ... ADD CONSTRAINT statements. SSMS states foreign
+		// keys and checks this way, and with no branch for them a streamed
+		// script kept neither.
+		if strings.HasPrefix(dispatch, "ALTER TABLE") {
+			constraint, err := p.parseConstraintStatement(statement)
+			if err != nil {
+				// An ALTER TABLE that adds no constraint is not this parser's
+				// business, and is no reason to end the stream.
+				continue
+			}
+
+			err = callback(stream.SchemaObject{
+				Type: stream.ConstraintObject,
+				Data: constraint,
+			})
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
 		// Parse CREATE TRIGGER statements
 		if strings.HasPrefix(dispatch, "CREATE TRIGGER") {
 			trigger, err := p.parseTriggerStatement(statement)
@@ -133,11 +155,11 @@ func (p *SQLServerStreamParser) ParseStream(reader io.Reader, callback func(stre
 			continue
 		}
 
-		// Parse CREATE INDEX statements
-		if strings.HasPrefix(dispatch, "CREATE INDEX") ||
-			strings.HasPrefix(dispatch, "CREATE UNIQUE INDEX") ||
-			strings.HasPrefix(dispatch, "CREATE CLUSTERED INDEX") ||
-			strings.HasPrefix(dispatch, "CREATE NONCLUSTERED INDEX") {
+		// Parse CREATE INDEX statements. The keywords combine, so listing the
+		// prefixes missed CREATE UNIQUE NONCLUSTERED INDEX, which is what SSMS
+		// writes for a unique index. The whole-file parser's own pattern is
+		// used instead.
+		if mssIndexHeaderRe.MatchString(dispatch) {
 			index, err := p.parseIndexStatement(statement)
 			if err != nil {
 				return err
@@ -281,10 +303,7 @@ func (p *SQLServerStreamParser) parseStatement(statement string) (*stream.Schema
 			Data: trigger,
 		}, nil
 
-	case strings.HasPrefix(upperStatement, "CREATE INDEX") ||
-		strings.HasPrefix(upperStatement, "CREATE UNIQUE INDEX") ||
-		strings.HasPrefix(upperStatement, "CREATE CLUSTERED INDEX") ||
-		strings.HasPrefix(upperStatement, "CREATE NONCLUSTERED INDEX"):
+	case mssIndexHeaderRe.MatchString(upperStatement):
 		index, err := p.parseIndexStatement(statement)
 		if err != nil {
 			return nil, err
@@ -349,7 +368,7 @@ func (p *SQLServerStreamParser) parseTableStatement(statement string) (*sqlmappe
 	// must not share mutable state through the embedded dialect parser.
 	localParser := &SQLServer{schema: tempSchema}
 
-	if err := localParser.parseTables(ensureTerminated(statement)); err != nil {
+	if err := localParser.parseTablesFromStatement([]byte(statement)); err != nil {
 		return nil, err
 	}
 
@@ -362,18 +381,22 @@ func (p *SQLServerStreamParser) parseTableStatement(statement string) (*sqlmappe
 
 // parseViewStatement parses a CREATE VIEW statement
 func (p *SQLServerStreamParser) parseViewStatement(statement string) (*sqlmapper.View, error) {
-	tempSchema := &sqlmapper.Schema{}
-	// A parser per statement: stream parsers are used concurrently and
-	// must not share mutable state through the embedded dialect parser.
-	localParser := &SQLServer{schema: tempSchema}
+	// The file parser's reader is used, not a second one of the stream's own.
+	// The stream had its own and it left the brackets on the name, so a real
+	// SSMS script produced a view called [active_customers.
+	localParser := &SQLServer{schema: &sqlmapper.Schema{}}
 
-	if err := localParser.parseViews(ensureTerminated(statement)); err != nil {
+	view, err := localParser.parseCreateView([]byte(statement))
+	if err != nil {
 		return nil, err
 	}
-
-	if len(tempSchema.Views) == 0 {
+	// The whole-file parser records whatever it can and moves on. A stream
+	// hands back one object per statement, so a statement it could not read has
+	// to be reported rather than returned empty.
+	if view.Name == "" || view.Definition == "" {
 		return nil, fmt.Errorf("no view found in statement")
 	}
+	tempSchema := &sqlmapper.Schema{Views: []sqlmapper.View{view}}
 
 	return &tempSchema.Views[0], nil
 }
@@ -493,4 +516,38 @@ var orReplaceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+`)
 // once here rather than doubling every case in the dispatch.
 func dispatchKey(statement string) string {
 	return strings.ToUpper(orReplaceRe.ReplaceAllString(strings.TrimSpace(statement), "CREATE "))
+}
+
+// parseConstraintStatement reads one ALTER TABLE ... ADD CONSTRAINT.
+//
+// The whole-file parser attaches the constraint to a table it has already read,
+// which a stream cannot do: the table was handed to the caller and forgotten.
+// The constraint is reported on its own instead, the way an index is.
+func (p *SQLServerStreamParser) parseConstraintStatement(statement string) (*sqlmapper.Constraint, error) {
+	// The whole-file parser normalises every statement as it splits them, and
+	// the stream did not. SSMS writes "ADD  CONSTRAINT" with two spaces, which
+	// the branch looking for "ADD CONSTRAINT" does not match, so the statement
+	// was read as a column definition instead.
+	stmt := normalizeSQLServerDDL(statement)
+
+	// "ALTER TABLE x CHECK CONSTRAINT y" only re-enables a constraint that was
+	// already declared; there is nothing in it to parse.
+	if mssCheckOnlyRe.MatchString(stmt) {
+		return nil, fmt.Errorf("no constraint found in statement")
+	}
+
+	localParser := &SQLServer{schema: &sqlmapper.Schema{}, buf: bytes.NewBuffer(nil)}
+
+	if err := localParser.parseAlterTable([]byte(stmt)); err != nil {
+		return nil, err
+	}
+
+	if len(localParser.schema.Tables) == 0 {
+		return nil, fmt.Errorf("no constraint found in statement")
+	}
+	constraints := localParser.schema.Tables[0].Constraints
+	if len(constraints) == 0 {
+		return nil, fmt.Errorf("no constraint found in statement")
+	}
+	return &constraints[0], nil
 }
